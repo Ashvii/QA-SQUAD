@@ -107,7 +107,7 @@ FUNC_RE = re.compile(r"^\s*(?:(?:public|protected|private|static|final|abstract|
                      r"(?:function|def|fn|func(?:\s+\([^)]*\))?)\s+&?(\w+)")
 
 # ---------------------------------------------------------------------------
-# Sub-agent briefs. SKILL.md quotes these verbatim; tests keep them in sync.
+# Sub-agent briefs. SKILL.md quotes these verbatim; keep the two in sync.
 # ---------------------------------------------------------------------------
 
 HUNTER_BRIEF = """You are a QA hunter in lane "{lane}" (hunter {n} of {depth}). Angle: {angle}.

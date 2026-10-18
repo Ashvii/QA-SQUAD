@@ -118,7 +118,7 @@ Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (measured 
 | full (all 11 lanes) | 11 × 2 | 22 | 110 | **132** | 14 | yes |
 | full `--depth 3` | 11 × 3 | 33 | 165 | **198** | 21 | yes |
 
-Real example: the download-centre test run (7 lanes × depth 1) used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
+Real example: a run on a multi-tenant CSV-export feature (7 lanes × depth 1) used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
 
 ## Output
 
@@ -146,14 +146,12 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v      # 69 tests, stdlib only
-python3 tests/dry_run.py --keep                # full pipeline on tests/fixtures/shop with stand-in agents
 python3 skills/qa-squad/qa.py plan --quick     # cost table
+python3 skills/qa-squad/qa.py detect           # detected backend and frontend stack
+python3 skills/qa-squad/bench.py --help        # the local latency tool agents use
 ```
 
-`tests/fixtures/shop` is a tiny Laravel shop with three planted bugs: a non-atomic stock decrement, an IDOR on order show, and a non-idempotent payment webhook. `tests/standin.py` plays the sub-agents. It reads the same briefs a real agent would and writes canned findings and verdicts with real file:line citations. The dry run flags all three bugs and the gate says BLOCK.
-
-`tests/fixtures/download-centre` is a larger, multi-tenant Laravel + Inertia/Vue feature used to evaluate the skill with **real** sub-agents. It contains backend, frontend and performance bugs plus decoys. The answer key is kept outside the fixture, in `tests/fixtures/download-centre.ANSWERS.md`, so agents running on a copy never see it. To evaluate, copy the folder somewhere, run `/qa-squad` on it, and score `REPORT.md` against the key. The unit tests also use it for frontend detection.
+`qa.py` and `bench.py` use only the Python 3.8+ standard library. `SKILL.md` quotes the hunter and skeptic briefs from `qa.py` word for word, so keep the two in sync when you edit either.
 
 The release gate, the severity definitions and the validation rules are in [`skills/qa-squad/rubric.md`](skills/qa-squad/rubric.md).
 
