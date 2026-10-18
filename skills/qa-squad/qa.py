@@ -31,6 +31,7 @@ VERSION = "1.0.0"
 SKILL_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATES_DIR = os.path.join(SKILL_DIR, "templates")
 LANES_PATH = os.path.join(SKILL_DIR, "lanes.json")
+BENCH_PATH = os.path.join(SKILL_DIR, "bench.py")
 RUNS_DIR = ".qa-squad"
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
@@ -160,8 +161,10 @@ SAFETY_RULES = """SAFETY RULES (hard requirements; breaking one makes your outpu
    .qa-squad/{run}/. Generated tests stay there; applying them is the user's decision.
 2. Never run anything that writes data unless APP_ENV is local/testing AND the DB name clearly
    indicates a test database. If unsure, static analysis only.
-3. No load/stress testing. No calls to real external services or payment APIs; use fakes
-   (Http::fake, Queue::fake, Event::fake or the stack's equivalent) or stop at LIKELY.
+3. No load/stress testing. Latency is measured ONLY with the qa-squad bench tool against the local app
+   (it refuses non-localhost targets and caps requests/concurrency/time). No calls to real external
+   services or payment APIs; use fakes (Http::fake, Queue::fake, Event::fake or the stack's equivalent)
+   or stop at LIKELY.
 4. No exploit tooling or scanning outside the local test app.
 5. No destructive commands (migrate:fresh on a non-test DB, rm -rf, DROP, TRUNCATE, etc.).
 6. Secrets: never print .env values into findings, tests, logs or replies.
@@ -856,6 +859,8 @@ def hunter_brief(ctx, job):
     text += fill(HUNTER_BRIEF_EXTRA, values)
     parts = [text, "", root_note(ctx), "Evidence standard for this lane: %s" % lane.get("evidence_standard", ""),
              stack_note(ctx), ""]
+    if lane["id"] == "performance":
+        parts += [bench_note(ctx), ""]
     if job["fix"]:
         parts += ["WHY YOU WERE SPAWNED: these findings from your lane were rejected by qa.py validate. "
                   "Read each one, fix what made it invalid (or drop it if it cannot be made concrete), and "
@@ -905,6 +910,12 @@ def skeptic_brief(ctx, job):
                   "equivalent: multiprocessing, Promise.all, threads, goroutines); (c) `parallel_test: yes`. "
                   "qa.py checks the file exists there and uses a parallel construct; otherwise it downgrades "
                   "CONFIRMED to LIKELY. Calling the endpoint twice in sequence does not count." % ctx.run_id, ""]
+    if is_perf(finding):
+        parts += ["This is a performance claim. CONFIRMED requires `measurement:` naming a file under "
+                  ".qa-squad/%s/tests/ that holds the measurement (a bench.py JSON result, or captured "
+                  "query-count / EXPLAIN / memory output). Otherwise qa.py downgrades CONFIRMED to LIKELY. A "
+                  "single slow sample on a laptop proves nothing; growth with data size does." % ctx.run_id,
+                  bench_note(ctx), ""]
     if job.get("requeue_reason"):
         parts += ["YOUR PREVIOUS VERDICT FOR THIS FINDING WAS REJECTED: %s. Every verdict must cite at least "
                   "one file:line (e.g. app/Http/Controllers/OrderController.php:42)." % job["requeue_reason"], ""]
@@ -919,6 +930,26 @@ def skeptic_brief(ctx, job):
 def write_brief(ctx, kind, job):
     text = hunter_brief(ctx, job) if kind == "hunt" else skeptic_brief(ctx, job)
     atomic_write(ctx.abs(job["brief_path"]), text)
+
+
+def bench_note(ctx):
+    bench = '%s "%s"' % (py_cmd(), BENCH_PATH)
+    out = ".qa-squad/%s/tests/bench" % ctx.run_id
+    return (
+        "LATENCY MEASUREMENT: time things ONLY with the qa-squad bench tool, which refuses non-localhost targets "
+        "and caps every run at 500 requests, 8 concurrent, 60 s (a measurement, never a load test):\n"
+        "  %s http http://127.0.0.1:<port>/api/... -n 50 -c 1 --budget-ms <p95 budget> --label <name> "
+        "--out %s/<name>.json\n"
+        "  %s cmd -n 10 --label <name> --out %s/<name>.json -- php .qa-squad/%s/tests/<script>.php\n"
+        "  %s compare %s/<small>.json %s/<large>.json --size-small 1000 --size-large 10000\n"
+        "Serve the app (or a minimal reproduction) on 127.0.0.1 only, e.g. `php artisan serve --host=127.0.0.1` "
+        "or `php -S 127.0.0.1:8099 -t <dir>`, and stop it when done. Absolute numbers on this machine are "
+        "noisy; the strong evidence is SCALING: measure the same endpoint at two data sizes (e.g. 1k and 10k rows "
+        "seeded into a test SQLite DB) and report the growth (`compare`). Also capture query counts "
+        "(DB::listen / query log) and, for jobs/exports, peak memory (memory_get_peak_usage). Budgets come from "
+        "scope.md; if none are given use rubric defaults (API p95 <= 500 ms, <= 10 queries per request, "
+        "flat or sublinear growth). Never put real tokens in --header values that end up in findings."
+        % (bench, out, bench, out, ctx.run_id, bench, out, out))
 
 
 def root_note(ctx):
@@ -1309,6 +1340,10 @@ def cmd_validate(args):
 # collect
 # ---------------------------------------------------------------------------
 
+def is_perf(finding):
+    return finding["lane"] == "performance" or finding.get("category") == "perf"
+
+
 def is_race(finding):
     return finding["lane"] == "race-conditions" or finding.get("category") == "race"
 
@@ -1395,9 +1430,16 @@ def cmd_collect(args):
                 tally["downgraded"] += 1
             else:
                 parallel = True
+        measurement = "" if norm(fm.get("measurement")) in ("", "none", "n a", "na", "no") else \
+            fm["measurement"].strip()
+        if verdict == "CONFIRMED" and is_perf(finding) and not (measurement and resolve_run_test(ctx, measurement)):
+            verdict = "LIKELY"
+            note = ("downgraded CONFIRMED -> LIKELY: performance claims need a measurement file inside %s/ "
+                    "(bench.py result or captured query-count/EXPLAIN output)" % ctx.rel("tests"))
+            tally["downgraded"] += 1
         finding.update({
             "verdict": verdict, "verdict_note": note, "parallel_test": parallel,
-            "test": test,
+            "test": test, "measurement": measurement,
             "verdict_evidence": "\n".join(dict.fromkeys(
                 x for x in (fm.get("evidence", "").strip(), strip_comments(sec.get("evidence", ""))) if x)),
             "verdict_reason": strip_comments(sec.get("reasoning", "")),
@@ -1735,6 +1777,84 @@ def testcase_rows(ctx, finals, secs):
     return rows
 
 
+def bench_results(ctx):
+    """Every qa-squad-bench JSON file written under the run's tests/ directory, sorted by path."""
+    results = []
+    root = ctx.path("tests")
+    for dirpath, _dirs, files in os.walk(root):
+        for name in sorted(files):
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(dirpath, name)
+            data = load_json_file(path)
+            if isinstance(data, dict) and data.get("tool") == "qa-squad-bench":
+                data["_file"] = os.path.relpath(path, ctx.project).replace(os.sep, "/")
+                results.append(data)
+    return sorted(results, key=lambda d: natkey(d["_file"]))
+
+
+SIZE_LABEL_RE = re.compile(r"^(?P<base>.*?)[-_ ]?(?P<num>\d+(?:\.\d+)?)(?P<unit>[kKmM]?)$")
+
+
+def auto_scaling(timed):
+    """Pair results whose labels differ only by a data size (index-1k / index-10k) and compute the growth."""
+    groups = {}
+    for r in timed:
+        m = SIZE_LABEL_RE.match(str(r.get("label") or ""))
+        if not m or not r.get("p95_ms") or not m.group("base").strip("-_ "):
+            continue
+        size = float(m.group("num")) * {"k": 1e3, "m": 1e6}.get(m.group("unit").lower(), 1)
+        groups.setdefault((m.group("base").strip("-_ "), r.get("kind")), []).append((size, r))
+    rows = []
+    for (base, _kind), items in sorted(groups.items()):
+        sizes = sorted(items, key=lambda x: x[0])
+        (s_small, small), (s_large, large) = sizes[0], sizes[-1]
+        if s_large <= s_small:
+            continue
+        growth = large["p95_ms"] / small["p95_ms"]
+        exponent = math.log(growth) / math.log(s_large / s_small) if growth > 0 else 0.0
+        scaling = ("superlinear" if exponent > 1.2 else "linear" if exponent > 0.7
+                   else "sublinear" if exponent > 0.25 else "flat")
+        rows.append({"label": "%s vs %s" % (small["label"], large["label"]),
+                     "small": {"p95_ms": small["p95_ms"]}, "large": {"p95_ms": large["p95_ms"]},
+                     "size_growth": round(s_large / s_small, 2), "p95_growth": round(growth, 2),
+                     "exponent": round(exponent, 2), "scaling": scaling, "auto": True})
+    return rows
+
+
+def performance_md(ctx):
+    results = bench_results(ctx)
+    if not results:
+        return ("_No latency measurements were taken. Run the `performance` lane (with the app served on "
+                "127.0.0.1) to measure p50/p95/p99 and scaling with data size._")
+    timed = [r for r in results if r.get("kind") in ("http", "cmd")]
+    compares = [r for r in results if r.get("kind") == "compare"]
+    known = {r.get("label") for r in compares}
+    compares += [r for r in auto_scaling(timed) if r["label"] not in known]
+    lines = ["All numbers come from `bench.py` against the local app: they show relative cost and growth, "
+             "not production latency.", ""]
+    if timed:
+        lines += ["| Label | Target | n / conc | ok / err | p50 ms | p95 ms | p99 ms | Budget | Result |",
+                  "|---|---|---|---|---|---|---|---|---|"]
+        for r in timed:
+            budget = ("%g ms" % r["budget_ms"]) if r.get("budget_ms") else "-"
+            result = "**OVER**" if r.get("over_budget") else ("ok" if r.get("budget_ms") else "-")
+            lines.append("| %s | `%s` | %s / %s | %s / %s | %s | %s | %s | %s | %s |" % (
+                md_cell(r.get("label")), md_cell(r.get("target"), 70), r.get("requested"), r.get("concurrency"),
+                r.get("ok"), r.get("errors"), r.get("p50_ms"), r.get("p95_ms"), r.get("p99_ms"), budget, result))
+    if compares:
+        lines += ["", "**Scaling** (same operation at two data sizes; exponent 1 = linear. Pairs are matched "
+                  "automatically by label, e.g. `index-1k` / `index-10k`):", "",
+                  "| Comparison | p95 small -> large | Data growth | Latency growth | Exponent | Scaling |",
+                  "|---|---|---|---|---|---|"]
+        for r in compares:
+            flag = "**%s**" % r["scaling"] if r.get("scaling") == "superlinear" else r.get("scaling")
+            lines.append("| %s | %s -> %s ms | x%s | x%s | %s | %s |" % (
+                md_cell(r.get("label")), r["small"].get("p95_ms"), r["large"].get("p95_ms"),
+                r.get("size_growth") or "?", r.get("p95_growth"), r.get("exponent"), flag))
+    return "\n".join(lines)
+
+
 def cmd_report(args):
     ctx = open_run(args)
     st = ctx.state
@@ -1832,7 +1952,8 @@ def cmd_report(args):
         "summary_counts": "Live findings by severity: %s  \nVerdicts: %s  \nRejected as malformed/vague: %d · "
                           "merged as duplicates: %d" % (sev_counts, ver_counts, rejected, merged),
         "summary_table": "\n".join(table), "findings": findings_md, "disputed": disputed_md,
-        "needs_env": needs_md, "coverage_summary": cov_summary, "coverage": "\n".join(cov),
+        "needs_env": needs_md, "performance": performance_md(ctx),
+        "coverage_summary": cov_summary, "coverage": "\n".join(cov),
         "testcases": "\n".join(tc), "tests_dir": ctx.rel("tests") + "/",
     }
     report = string.Template(read_template("report.md.tmpl")).safe_substitute(values)

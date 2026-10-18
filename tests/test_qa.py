@@ -25,6 +25,10 @@ sys.path.insert(0, SKILL)
 sys.path.insert(0, HERE)
 
 import qa  # noqa: E402
+import bench  # noqa: E402
+import http.server  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
 import standin  # noqa: E402
 import dry_run  # noqa: E402
 
@@ -1082,6 +1086,195 @@ class TestFrontend(unittest.TestCase):
         self.assertEqual(qa.compute_gate(gate_state(xss), lanes)["result"], "BLOCK")
 
 
+# ---------------------------------------------------------------------------
+# performance & latency (bench.py)
+# ---------------------------------------------------------------------------
+
+class _Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/slow":
+            time.sleep(0.03)
+        if self.path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "http://8.8.8.8/")
+            self.end_headers()
+            return
+        self.send_response(500 if self.path == "/err" else 200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok": true}')
+
+    def log_message(self, *args):
+        pass
+
+
+class TestBench(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qa-squad-bench-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def bench(self, *argv):
+        buf, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+            code = bench.main(list(argv))
+        return code, buf.getvalue(), err.getvalue()
+
+    def url(self, path, host="127.0.0.1"):
+        return "http://%s:%d%s" % (host, self.port, path)
+
+    def result(self, name):
+        with open(os.path.join(self.tmp, name), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_http_measurement_and_budget(self):
+        out = os.path.join(self.tmp, "fast.json")
+        code, text, err = self.bench("http", self.url("/fast"), "-n", "20", "-c", "2", "--budget-ms", "2000",
+                                     "--label", "fast", "--out", out, "-H", "Authorization: Bearer s3cr3t")
+        self.assertEqual(code, 0, err)
+        r = self.result("fast.json")
+        self.assertEqual((r["tool"], r["kind"], r["ok"], r["errors"], r["over_budget"]),
+                         ("qa-squad-bench", "http", 20, 0, False))
+        self.assertTrue(r["p50_ms"] <= r["p95_ms"] <= r["p99_ms"] <= r["max_ms"])
+        with open(out, encoding="utf-8") as fh:
+            self.assertNotIn("s3cr3t", fh.read(), "header values must never be stored")
+        self.assertIn("p95=", text)
+        self.assertEqual(self.bench("http", self.url("/slow"), "-n", "5", "--warmup", "0", "--budget-ms", "1",
+                                    "--label", "slow", "--out", os.path.join(self.tmp, "slow.json"))[0], 0)
+        self.assertTrue(self.result("slow.json")["over_budget"])
+
+    def test_refuses_non_local_targets_and_big_runs(self):
+        for url in ("http://8.8.8.8/", "http://10.0.0.1:80/", "http://example.com/", "ftp://127.0.0.1/"):
+            code, _, err = self.bench("http", url, "-n", "3", "--label", "x",
+                                      "--out", os.path.join(self.tmp, "x.json"))
+            self.assertEqual(code, 2, url)
+            self.assertIn("error", err)
+        for args in (("-n", "501"), ("-c", "9"), ("--warmup", "50")):
+            code, _, err = self.bench("http", self.url("/fast"), *(args + ("--label", "x", "--out",
+                                                                            os.path.join(self.tmp, "x.json"))))
+            self.assertEqual(code, 2, args)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "x.json")))
+
+    def test_redirects_are_not_followed_and_errors_counted(self):
+        self.bench("http", self.url("/redirect"), "-n", "3", "--warmup", "0", "--label", "r",
+                   "--out", os.path.join(self.tmp, "r.json"))
+        r = self.result("r.json")
+        self.assertEqual((r["ok"], r["errors"], r["status_counts"]), (0, 3, {"302": 3}))
+        self.bench("http", self.url("/err"), "-n", "2", "--warmup", "0", "--label", "e",
+                   "--out", os.path.join(self.tmp, "e.json"))
+        self.assertEqual(self.result("e.json")["errors"], 2)
+
+    def test_localhost_is_pinned_to_the_listening_loopback_address(self):
+        code, _, err = self.bench("http", self.url("/fast", host="localhost"), "-n", "5", "--label", "lh",
+                                  "--out", os.path.join(self.tmp, "lh.json"))
+        self.assertEqual(code, 0, err)
+        r = self.result("lh.json")
+        self.assertEqual(r["resolved_to"], "127.0.0.1")
+        self.assertLess(r["p95_ms"], 1000, "no ~2s IPv6 fallback per request")
+        code, _, err = self.bench("http", "http://localhost:1/", "-n", "1", "--label", "dead",
+                                  "--out", os.path.join(self.tmp, "dead.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("nothing is listening", err)
+
+    def test_cmd_and_compare(self):
+        code, _, err = self.bench("cmd", "-n", "2", "--warmup", "0", "--label", "py",
+                                  "--out", os.path.join(self.tmp, "py.json"), "--", sys.executable, "-c", "pass")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result("py.json")["ok"], 2)
+        base = {"tool": "qa-squad-bench", "kind": "http", "p50_ms": 5}
+        for name, p95 in (("s.json", 10.0), ("lin.json", 100.0), ("sup.json", 1000.0)):
+            with open(os.path.join(self.tmp, name), "w") as fh:
+                json.dump(dict(base, label=name, p95_ms=p95), fh)
+        for large, expected in (("lin.json", "linear"), ("sup.json", "superlinear")):
+            code, text, err = self.bench("compare", os.path.join(self.tmp, "s.json"), os.path.join(self.tmp, large),
+                                         "--size-small", "1000", "--size-large", "10000",
+                                         "--out", os.path.join(self.tmp, "cmp-" + large))
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.result("cmp-" + large)["scaling"], expected)
+
+
+class TestAutoScaling(unittest.TestCase):
+    def test_pairs_results_by_size_suffix(self):
+        def r(label, p95, kind="http"):
+            return {"label": label, "p95_ms": p95, "kind": kind}
+        rows = {x["label"]: x for x in qa.auto_scaling([
+            r("index-1k", 25.8), r("index-10k", 30.1),                 # flat
+            r("job-10k", 86.5, "cmd"), r("job-100k", 630.2, "cmd"),    # linear
+            r("pf002-prune-1k", 10.0, "cmd"), r("pf002-prune-10k", 400.0, "cmd"),  # superlinear
+            r("orders", 12.0), r("single-5k", 9.0)])}                  # unpaired: ignored
+        self.assertEqual(rows["index-1k vs index-10k"]["scaling"], "flat")
+        self.assertEqual(rows["job-10k vs job-100k"]["scaling"], "linear")
+        self.assertEqual(rows["pf002-prune-1k vs pf002-prune-10k"]["scaling"], "superlinear")
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(rows["job-10k vs job-100k"]["size_growth"], 10.0)
+
+
+class TestPerformanceRule(Base):
+    def setUp(self):
+        super(TestPerformanceRule, self).setUp()
+        self.init("--lanes", "perf", "--depth", "1")
+        self.qa("prompts", "hunt")
+        self.write("findings/performance-1-1.md", good(
+            lane="performance", category="perf", severity="MEDIUM", title="Order list issues one query per order",
+            root_cause="product relation lazy-loaded in index",
+            trigger="Seed 500 orders, then GET /api/orders and count the queries with DB::listen."))
+        self.write("findings/performance-1.done", "findings: 1\ncovered: 1, 2, 3\n")
+        self.qa("validate")
+        self.qa("prompts", "verify")
+
+    def verdict(self, measurement):
+        text = standin.verdict_md("PF-001", "CONFIRMED", CHECKOUT + ":17", "Measured.").replace(
+            "parallel_test: no", "parallel_test: no\nmeasurement: %s" % measurement)
+        self.write("verdicts/PF-001.md", text)
+        self.qa("collect")
+        return self.state()["findings"]["PF-001"]
+
+    def test_confirmed_perf_without_measurement_is_downgraded(self):
+        f = self.verdict("none")
+        self.assertEqual(f["verdict"], "LIKELY")
+        self.assertIn("performance claims need a measurement file", f["verdict_note"])
+
+    def test_confirmed_perf_with_measurement_file_stays_confirmed(self):
+        os.makedirs(self.run_path("tests", "bench"))
+        self.write("tests/bench/orders.json", json.dumps({"tool": "qa-squad-bench", "kind": "http"}))
+        self.assertEqual(self.verdict("bench/orders.json")["verdict"], "CONFIRMED")
+
+    def test_brief_and_report_section(self):
+        with open(self.run_path("briefs", "hunt", "performance-1.md"), encoding="utf-8") as fh:
+            brief = fh.read()
+        self.assertIn("LATENCY MEASUREMENT", brief)
+        self.assertIn(qa.BENCH_PATH, brief)
+        self.assertIn("refuses non-localhost targets", brief)
+        os.makedirs(self.run_path("tests", "bench"))
+        self.write("tests/bench/orders-1k.json", json.dumps({
+            "tool": "qa-squad-bench", "kind": "http", "label": "orders-1k",
+            "target": "GET http://127.0.0.1:8099/api/orders", "requested": 50, "concurrency": 1, "ok": 50,
+            "errors": 0, "p50_ms": 12.1, "p95_ms": 20.4, "p99_ms": 25.0, "budget_ms": 300, "over_budget": False}))
+        self.write("tests/bench/orders-scaling.json", json.dumps({
+            "tool": "qa-squad-bench", "kind": "compare", "label": "orders-1k vs orders-10k",
+            "small": {"p95_ms": 20.4}, "large": {"p95_ms": 410.0}, "size_growth": 10.0, "p95_growth": 20.1,
+            "exponent": 1.3, "scaling": "superlinear"}))
+        self.verdict("bench/orders-1k.json")
+        self.qa("dedupe")
+        self.qa("report")
+        with open(self.run_path("REPORT.md"), encoding="utf-8") as fh:
+            report = fh.read()
+        self.assertIn("## Performance measurements", report)
+        self.assertIn("| orders-1k |", report)
+        self.assertIn("**superlinear**", report)
+
+
 class TestDetectAndCli(unittest.TestCase):
     def test_detect(self):
         self.assertEqual(qa.detect_stack(FIXTURE)["stack"], "laravel")
@@ -1122,6 +1315,12 @@ class TestDetectAndCli(unittest.TestCase):
         allowed = {"argparse", "csv", "datetime", "difflib", "hashlib", "io", "json", "math", "os", "random",
                    "re", "shutil", "string", "sys", "tempfile"}
         self.assertTrue(mods <= allowed, mods - allowed)
+        with open(os.path.join(SKILL, "bench.py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        mods = {n.names[0].name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)}
+        stdlib = {"argparse", "datetime", "ipaddress", "json", "math", "os", "socket", "subprocess", "sys",
+                  "threading", "time", "urllib"}
+        self.assertTrue(mods <= stdlib, mods - stdlib)
 
 
 if __name__ == "__main__":

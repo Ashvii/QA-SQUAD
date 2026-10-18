@@ -41,6 +41,12 @@
 ## Business rules and state machines
 <!-- Numbered rules. Status transitions as "pending -> paid -> shipped; pending -> cancelled". Limits. -->
 
+## Performance budgets
+<!-- Latency/throughput targets the performance lane measures against (locally, with bench.py). Example:
+GET /api/exports: p95 <= 300 ms with 10k exports; POST /api/exports: p95 <= 500 ms; <= 10 queries per request;
+export job: <= 256 MB peak memory for 1M invoices. "none" = rubric defaults. Also: how to serve the app on
+127.0.0.1 (e.g. php artisan serve --host=127.0.0.1 --port=8099) and how to seed a test DB at two sizes. -->
+
 ## How to run tests
 <!-- Exact commands, e.g.
 php artisan test --filter=Checkout

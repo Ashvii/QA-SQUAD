@@ -97,7 +97,7 @@ The architecture is borrowed from "arena"-style skills. A thin orchestrator prom
 | `authz-security` | 401/403, IDOR, tenant isolation, mass assignment, leaks, injection, XSS, rate limits | never for reachable code |
 | `database` | missing constraints/indexes, N+1, migrations on populated tables, deadlock/retry safety | no DB access |
 | `queue-cache-external` | retries, duplicate side effects, failed_jobs, Redis down, stale cache, webhooks, 429s | no async/integration |
-| `performance` | what falls over at 10x; static analysis and bounded measurement only, no load tests | trivial changes |
+| `performance` | latency measured locally with `bench.py` (p50/p95/p99 against budgets, scaling at 1x vs 10x data), query counts, EXPLAIN, memory in exports/jobs, N+1, unbounded queries, frontend request/poll cost. Never a load test | trivial changes |
 | `frontend` | API-contract mismatches (fields/pagination the UI reads but the API never returns), stale-response races, double submit, swallowed errors, client-only authorization, XSS sinks (`v-html`, `{!! !!}`), Livewire property tampering, Inertia shared-prop leaks, leaked pollers | no browser code |
 | `ui-ux` | loading/empty/error states, form errors per field, back button, session expiry, a11y, timezones | no UI |
 | `chaos-ops` | env/secrets, debug mode, deploy order, `queue:restart`, logging, alerts, rollback | pure refactor |
@@ -128,7 +128,7 @@ Everything goes in `.qa-squad/<YYYYMMDD-HHMMSS-slug>/` in your project. The fold
 |---|---|
 | `REPORT.md` | header, release gate + reasons, summary table, findings by severity (trigger, evidence, failing test, fix, which lanes), disputed findings with the evidence that killed them, needs-env items, coverage matrix, test-case table |
 | `testcases.csv` | `Test Case ID, Feature, Scenario, Preconditions, Test data, Steps, Expected result, Actual result, Priority/Severity, Status`, ready for Jira / TestRail / Sheets import. CONFIRMED → Fail, LIKELY → Blocked, NEEDS-ENV → Not tested, DISPUTED → Pass |
-| `tests/` | tests written by hunters and skeptics. They are never copied into your suite unless you say so |
+| `tests/` | tests and `bench.py` measurements written by hunters and skeptics. They are never copied into your suite unless you say so |
 | `scope.md`, `state.json` | the exact context agents saw (with its SHA-256) and the run's state |
 | `findings/`, `verdicts/`, `briefs/` | raw agent output (rejects in `_rejected/` with a reason) and the exact brief each agent got |
 
@@ -138,7 +138,7 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 
 1. Never edit application source, config, migrations or existing tests. Agents write only inside `.qa-squad/`. Applying generated tests is your decision, and the skill asks first.
 2. Nothing that writes data runs unless `APP_ENV` is local/testing **and** the DB name is clearly a test database. Otherwise agents do static analysis only.
-3. No load or stress testing. No calls to real external services or payment APIs: agents use fakes (`Http::fake`, `Queue::fake`, `Event::fake`) or stop at LIKELY.
+3. No load or stress testing. Latency is measured only with `bench.py` against **localhost**: it refuses remote targets, never follows redirects, and caps each run at 500 requests, 8 concurrent and 60 s. No calls to real external services or payment APIs: agents use fakes (`Http::fake`, `Queue::fake`, `Event::fake`) or stop at LIKELY.
 4. No exploit tooling, and no scanning outside the local test app.
 5. No destructive commands (`migrate:fresh` on a non-test DB, `rm -rf`, `DROP`, …).
 6. `.env` values never appear in findings, logs or the report.
@@ -146,7 +146,7 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v      # 60 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 69 tests, stdlib only
 python3 tests/dry_run.py --keep                # full pipeline on tests/fixtures/shop with stand-in agents
 python3 skills/qa-squad/qa.py plan --quick     # cost table
 ```

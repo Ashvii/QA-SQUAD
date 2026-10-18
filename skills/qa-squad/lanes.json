@@ -5,7 +5,10 @@
       "id": "functional",
       "name": "Functional",
       "prefix": "FN",
-      "aliases": ["func", "fn"],
+      "aliases": [
+        "func",
+        "fn"
+      ],
       "mission": "Prove the feature does what the business rules say, and fails correctly when it shouldn't succeed.",
       "checklist": [
         "Happy path with valid inputs",
@@ -34,7 +37,11 @@
       "id": "race-conditions",
       "name": "Race conditions",
       "prefix": "RC",
-      "aliases": ["race", "rc", "concurrency"],
+      "aliases": [
+        "race",
+        "rc",
+        "concurrency"
+      ],
       "mission": "Find any place two requests, workers, or callbacks touching the same resource can corrupt state.",
       "checklist": [
         "Two users update the same record -> no silent lost update",
@@ -67,7 +74,11 @@
       "id": "data-integrity",
       "name": "Data integrity",
       "prefix": "DI",
-      "aliases": ["integrity", "di", "data"],
+      "aliases": [
+        "integrity",
+        "di",
+        "data"
+      ],
       "mission": "Find ways data ends up wrong, orphaned, partial, or lossy.",
       "checklist": [
         "Record missing, deleted or inaccessible",
@@ -99,7 +110,13 @@
       "id": "authz-security",
       "name": "Authorization & security",
       "prefix": "AZ",
-      "aliases": ["authz", "security", "auth", "sec", "az"],
+      "aliases": [
+        "authz",
+        "security",
+        "auth",
+        "sec",
+        "az"
+      ],
       "mission": "Find any way to do or see something you shouldn't.",
       "checklist": [
         "Unauthenticated -> 401",
@@ -132,7 +149,10 @@
       "id": "database",
       "name": "Database",
       "prefix": "DB",
-      "aliases": ["db", "sql"],
+      "aliases": [
+        "db",
+        "sql"
+      ],
       "mission": "Make the database the last line of defence and make sure it performs.",
       "checklist": [
         "Foreign key and unique constraints exist and match business rules",
@@ -160,7 +180,13 @@
       "id": "queue-cache-external",
       "name": "Queue, cache & external services",
       "prefix": "QC",
-      "aliases": ["queue", "cache", "external", "qc", "jobs"],
+      "aliases": [
+        "queue",
+        "cache",
+        "external",
+        "qc",
+        "jobs"
+      ],
       "mission": "Break asynchronous and integration behaviour.",
       "checklist": [
         "Job succeeds normally",
@@ -190,36 +216,55 @@
     },
     {
       "id": "performance",
-      "name": "Performance",
+      "name": "Performance & latency",
       "prefix": "PF",
-      "aliases": ["perf", "pf"],
-      "mission": "Find what falls over at 10x.",
+      "aliases": [
+        "perf",
+        "pf",
+        "latency",
+        "speed",
+        "bench"
+      ],
+      "mission": "Measure latency on the local app and find what falls over at 10x: endpoints whose p95 breaks the budget, cost that grows faster than the data, too many queries, memory blow-ups, and slow pages.",
       "checklist": [
-        "Realistic and 10x data volume",
-        "p50/p95/p99 latency expectations",
-        "Query count and execution time",
-        "Lock contention",
-        "Memory in exports/imports/bulk operations (get() vs chunk/cursor/lazy)",
-        "Pagination, chunking, streaming",
-        "Expensive reports/integrations should be async",
-        "Unbounded queries and accidental full-table scans",
-        "Behaviour when DB, Redis, or queue capacity is saturated"
+        "Latency of every endpoint in scope: p50/p95/p99 measured locally with bench.py against the budget in scope.md (rubric defaults if none)",
+        "Scaling: the same endpoint/job at two data sizes (e.g. 1k vs 10k rows); growth must be flat or sublinear for paginated reads",
+        "Query count per request (DB::listen / query log): N+1, queries inside loops, missing eager loading",
+        "Query plans: EXPLAIN on filter/sort/join columns; unbounded queries and accidental full-table scans",
+        "Memory in exports/imports/bulk operations (get() vs chunk/cursor/lazy): peak memory at two data sizes",
+        "Pagination, chunking and streaming for anything that can return many rows",
+        "Expensive reports and integrations run async (queue) instead of inside the request",
+        "Lock contention and long transactions on hot rows/tables",
+        "Frontend cost: requests per page load, polling frequency, payload size, re-render on every poll, bundle size if a build exists",
+        "Behaviour when DB, Redis or queue capacity is saturated (timeouts, retries, backpressure) - by reasoning, never by generating load"
       ],
       "techniques": [
-        "Static analysis of loops that query, ->get()/->all() without limits, missing pagination",
-        "Count queries with DB::listen on a handful of seeded rows and extrapolate",
-        "EXPLAIN on a handful of rows to spot full scans",
-        "Safety: STATIC ANALYSIS plus small, bounded measurements only. Never run heavy load or stress tests."
+        "Serve the app (or a minimal reproduction) on 127.0.0.1 and time it ONLY with bench.py (http/cmd/compare); it refuses non-local targets and caps every run",
+        "Seed a TEST SQLite/MySQL DB at two sizes and use `bench.py compare --size-small N --size-large 10N`: superlinear growth is the strongest evidence",
+        "Count queries with DB::listen / DB::enableQueryLog (or the stack's equivalent) and save the output under .qa-squad/<run>/tests/",
+        "EXPLAIN the feature's queries on the seeded data; save the plans",
+        "memory_get_peak_usage() (or the stack's equivalent) around jobs/exports at two sizes",
+        "Static analysis first: loops that query, ->get()/->all() without limits, missing pagination, work that should be queued",
+        "Safety: bench.py measurements only, never heavy load or stress tests, never against anything but localhost"
       ],
-      "evidence_standard": "file:line of the unbounded/N+1/blocking code + a bounded measurement (query count, EXPLAIN row) and the extrapolation to 10x.",
-      "skip_when": "Trivial changes (copy, config, single-row reads) unless explicitly requested.",
+      "evidence_standard": "file:line of the slow/unbounded code + a saved measurement under .qa-squad/<run>/tests/ (bench.py JSON, query counts, EXPLAIN, peak memory), ideally at two data sizes showing the growth, compared with the budget.",
+      "skip_when": "Trivial changes (copy, config, single-row reads) unless latency was explicitly requested.",
       "default_depth": 2
     },
     {
       "id": "frontend",
       "name": "Frontend logic & security",
       "prefix": "FE",
-      "aliases": ["fe", "js", "spa", "client", "vue", "react", "livewire", "inertia"],
+      "aliases": [
+        "fe",
+        "js",
+        "spa",
+        "client",
+        "vue",
+        "react",
+        "livewire",
+        "inertia"
+      ],
       "mission": "Find bugs in the code that runs in the browser: broken API contracts, stale or racing requests, client-only security, XSS sinks, leaked timers, and state that drifts from the server.",
       "checklist": [
         "API contract: every field a component reads exists in the API/Resource/Inertia-prop response with the same name, type, nullability and pagination shape",
@@ -255,7 +300,11 @@
       "id": "ui-ux",
       "name": "UI / UX",
       "prefix": "UI",
-      "aliases": ["ui", "ux", "a11y"],
+      "aliases": [
+        "ui",
+        "ux",
+        "a11y"
+      ],
       "mission": "Find where the interface lies to, loses, or blocks the user.",
       "checklist": [
         "Loading, empty, success and error states",
@@ -283,7 +332,12 @@
       "id": "chaos-ops",
       "name": "Chaos & ops",
       "prefix": "OP",
-      "aliases": ["ops", "chaos", "op", "deploy"],
+      "aliases": [
+        "ops",
+        "chaos",
+        "op",
+        "deploy"
+      ],
       "mission": "Find what breaks on deploy, under failure, or at 3am when nobody is watching.",
       "checklist": [
         "Environment variables and secrets present and correct",
@@ -309,7 +363,12 @@
       "id": "adversary",
       "name": "Adversary",
       "prefix": "AD",
-      "aliases": ["adv", "ad", "chaos-user", "hostile"],
+      "aliases": [
+        "adv",
+        "ad",
+        "chaos-user",
+        "hostile"
+      ],
       "mission": "Ignore the checklist and break the feature like a hostile or clumsy real user.",
       "checklist": [
         "Replay requests",

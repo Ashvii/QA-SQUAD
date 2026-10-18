@@ -49,6 +49,23 @@ If more than 50% of a lane's findings are rejected, one fix-pass hunter is spawn
 
 Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > LATENT > NEEDS-ENV > UNVERIFIED > DISPUTED.
 
+- **Performance rule:** a `performance` finding (or any finding with `category: perf`) can only be CONFIRMED if the verdict's `measurement:` names a file inside `.qa-squad/<run>/tests/`: a `bench.py` result, captured query counts, EXPLAIN output, or peak memory. Otherwise it is downgraded to LIKELY.
+
+## Performance budgets and measurement
+
+Latency is measured with `bench.py` against the **local** app only. The tool refuses any non-loopback target, never follows redirects, pins `localhost` to the loopback address that is actually listening (avoiding a ~2 s IPv6 fallback per request on Windows), and caps each run at 500 requests, 8 concurrent and 60 s. It is a measurement, not a load test.
+
+If scope.md gives no budgets, these defaults apply:
+
+| Measure | Default budget |
+|---|---|
+| API endpoint p95 (local, realistic seed) | <= 500 ms |
+| Queries per request | <= 10, and constant in the number of rows returned |
+| Growth from 1x to 10x data (paginated reads) | flat or sublinear (`bench.py compare` exponent <= 0.7) |
+| Exports, imports and jobs | memory roughly constant in row count (streamed with chunk/cursor/lazy) |
+
+Laptop numbers are noisy, so the strongest evidence is **scaling**: the same operation at two data sizes. Superlinear growth (exponent > 1.2) on a request path is at least MEDIUM, and HIGH when the scope's realistic volume puts p95 over the budget.
+
 ## Dedupe (`qa.py dedupe`, deterministic)
 
 Two findings describe the same issue if any of these holds:
