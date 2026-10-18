@@ -216,10 +216,46 @@
       "default_depth": 2
     },
     {
+      "id": "frontend",
+      "name": "Frontend logic & security",
+      "prefix": "FE",
+      "aliases": ["fe", "js", "spa", "client", "vue", "react", "livewire", "inertia"],
+      "mission": "Find bugs in the code that runs in the browser: broken API contracts, stale or racing requests, client-only security, XSS sinks, leaked timers, and state that drifts from the server.",
+      "checklist": [
+        "API contract: every field a component reads exists in the API/Resource/Inertia-prop response with the same name, type, nullability and pagination shape",
+        "Client-side validation matches the server rules (required, formats, min/max, date order); server 422 errors are mapped to the right fields",
+        "Stale or out-of-order responses: a slower earlier request cannot overwrite a newer one (search, filters, pagination, tab switches); requests are aborted or sequenced",
+        "Repeated actions: submit buttons disabled or requests de-duplicated while pending (double click, Enter + click, retry)",
+        "Failed requests are surfaced, not swallowed (missing catch, unhandled promise, generic message hiding the real error, error boundary)",
+        "Client-only security: actions hidden in the UI but allowed by the API, route guards without server checks, permissions or IDs taken from client state",
+        "Secrets and data leaks: tokens or keys in the JS bundle, auth tokens in localStorage, Inertia shared props or page props exposing fields the user must not see",
+        "XSS sinks: v-html, {!! !!}, x-html, dangerouslySetInnerHTML, innerHTML, user content in href/src (javascript:), unescaped Livewire/Alpine output",
+        "Livewire/Alpine: public properties and action parameters are client-controlled (#[Locked], authorization inside actions, wire:model on sensitive fields)",
+        "Polling, websockets, intervals and listeners stop on unmount and on terminal states; no duplicate pollers after re-render or navigation",
+        "Optimistic updates roll back on failure; local state matches the server after an error, refresh or reconnect",
+        "Routing and deep links: refresh, back button, direct URL and query-string state behave; 403/404/419 (CSRF/session expired) are handled",
+        "Dates, numbers and money: timezone/locale formatting, no float maths on money, date inputs sent in the format the server expects",
+        "Downloads and uploads: auth on file requests, filenames, blob/object-URL cleanup, size/type limits enforced server-side too"
+      ],
+      "techniques": [
+        "List every HTTP call (axios/fetch/useFetch/router.get/post, Inertia router, wire: actions) and map it to its backend route; then diff the fields the template reads against what the controller/API Resource actually returns",
+        "Grep for XSS sinks: v-html, x-html, {!!, dangerouslySetInnerHTML, innerHTML, insertAdjacentHTML, :href bound to user data",
+        "Grep for setInterval/setTimeout/addEventListener/Echo.listen and check the matching cleanup (onUnmounted/onBeforeUnmount/useEffect return/Alpine destroy)",
+        "For every async handler: is there a catch? Is the pending flag reset in finally? Can two calls interleave?",
+        "Component tests with Vitest/Jest + Testing Library or @vue/test-utils, mocking HTTP (vi.fn/msw), when node_modules is installed. E2E (Playwright/Cypress) only if already installed and only against localhost",
+        "Without node_modules: deterministic static proof (e.g. the API Resource has no download_url, so the template reads undefined), or a minimal plain-node script under .qa-squad/<run>/tests/ reproducing the logic (e.g. two promises resolving out of order)",
+        "Security bugs found here (XSS, client-only authorization, leaked data) use category authz so the release gate treats them as security; logic/state bugs use category frontend",
+        "Never install dependencies and never start servers on a public interface"
+      ],
+      "evidence_standard": "Component file:line + the user action sequence + what the user sees vs what they should see. For contract bugs, also the backend file:line that proves the field/shape is missing. CONFIRMED needs a component/E2E test run or a deterministic static proof.",
+      "skip_when": "No browser code in scope (no JS/TS/Vue/React/Svelte files, no Blade/Livewire/Inertia views).",
+      "default_depth": 2
+    },
+    {
       "id": "ui-ux",
       "name": "UI / UX",
       "prefix": "UI",
-      "aliases": ["ui", "ux", "frontend"],
+      "aliases": ["ui", "ux", "a11y"],
       "mission": "Find where the interface lies to, loses, or blocks the user.",
       "checklist": [
         "Loading, empty, success and error states",
@@ -236,7 +272,8 @@
         "Read Blade/Livewire/Inertia/Vue/React components for every state branch",
         "Check submit buttons for disabled/pending handling and server-side idempotency",
         "Check form error bag binding per field",
-        "Check that timestamps are formatted in the user's/app timezone"
+        "Check that timestamps are formatted in the user's/app timezone",
+        "Check form controls for associated labels, buttons for accessible names, icon-only buttons for aria-label, and focus management after dialogs/navigation"
       ],
       "evidence_standard": "Component file:line + the user action sequence + what the user sees vs what they should see.",
       "skip_when": "No UI (views, components, pages) in scope.",

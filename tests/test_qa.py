@@ -114,8 +114,8 @@ class TestPlan(Base):
 
     def test_default_all_lanes(self):
         p = self.plan()
-        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (10, 20, 100, 120))
-        self.assertEqual(p["waves"], 2 + 10)
+        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (11, 22, 110, 132))
+        self.assertEqual(p["waves"], 3 + 11)
         self.assertTrue(p["needs_consent"])
 
     def test_aliases_and_depth(self):
@@ -133,9 +133,9 @@ class TestPlan(Base):
 
     def test_no_verify_and_skip_and_estimate(self):
         p = self.plan("--skip", "ui-ux", "--depth", "1", "--no-verify")
-        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"], p["waves"]), (9, 9, 0, 9, 1))
+        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"], p["waves"]), (10, 10, 0, 10, 1))
         p = self.plan("--skip", "ui,perf", "--est-findings", "2")
-        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (8, 16, 32, 48))
+        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (9, 18, 36, 54))
 
     def test_wave_size(self):
         p = self.plan("--quick", "--wave", "2")
@@ -647,6 +647,12 @@ class TestCollect(Base):
         self.assertIn("rejected twice", st["findings"]["QC-001"]["verdict_note"])
         self.assertEqual(st["phase"], "deduping")
 
+    def test_latent_verdict_is_recorded(self):
+        self.write("verdicts/QC-001.md", verdict("QC-001", "LATENT", CHECKOUT + ":24"))
+        self.write("verdicts/RC-001.md", verdict("RC-001", "LIKELY", CHECKOUT + ":24"))
+        self.qa("collect")
+        self.assertEqual(self.state()["findings"]["QC-001"]["verdict"], "LATENT")
+
     def test_invalid_verdict_value_is_rejected(self):
         self.write("verdicts/QC-001.md", verdict("QC-001", "PROBABLY", CHECKOUT + ":20"))
         self.write("verdicts/RC-001.md", verdict("RC-001", "LIKELY", CHECKOUT + ":20"))
@@ -773,6 +779,14 @@ class TestGate(unittest.TestCase):
         self.assertEqual(self.gate(g("X-001", "HIGH", "CONFIRMED"))["result"], "WARN")
         self.assertEqual(self.gate(g("X-001", "MEDIUM", "LIKELY"))["result"], "WARN")
         self.assertEqual(self.gate(g("X-001", "CRITICAL", "UNVERIFIED"), verify=False)["result"], "WARN")
+
+    def test_latent_warns_but_never_blocks(self):
+        r = self.gate(g("FE-004", "HIGH", "LATENT", lane="frontend", category="authz",
+                        title="Stored XSS via v-html, masked by the paginator crash"))
+        self.assertEqual(r["result"], "WARN")
+        self.assertIn("latent: masked by another bug", r["reasons"][0])
+        self.assertEqual(self.gate(g("X-001", "LOW", "LATENT"))["result"], "PASS")
+        self.assertEqual(qa.TESTCASE_STATUS["LATENT"], "Blocked")
 
     def test_pass_cases(self):
         self.assertEqual(self.gate()["result"], "PASS")
@@ -977,6 +991,95 @@ class TestEndToEnd(Base):
         self.assertEqual(st["gate"]["result"], "WARN")
         with open(os.path.join(run_dir, "REPORT.md"), encoding="utf-8") as fh:
             self.assertIn("UNVERIFIED RUN", fh.read())
+
+
+DOWNLOAD_CENTRE = os.path.join(HERE, "fixtures", "download-centre")
+
+
+class TestFrontend(unittest.TestCase):
+    def tmpdir(self):
+        d = tempfile.mkdtemp(prefix="qa-squad-fe-")
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
+
+    def write(self, root, rel, text):
+        path = os.path.join(root, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_detects_inertia_vue_fixture(self):
+        fe = qa.detect_frontend(DOWNLOAD_CENTRE)
+        self.assertEqual(fe["frameworks"], ["inertia", "vue"])
+        self.assertEqual((fe["unit_runner"], fe["unit_command"]), ("vitest", "npx vitest run"))
+        self.assertTrue(fe["testing_library"])
+        self.assertFalse(fe["node_modules"])
+        self.assertEqual(qa.detect_stack(DOWNLOAD_CENTRE)["stack"], "laravel")
+
+    def test_detects_livewire_blade_react_and_none(self):
+        d = self.tmpdir()
+        self.write(d, "composer.json", '{"require": {"laravel/framework": "^11", "livewire/livewire": "^3"}}')
+        self.write(d, "resources/views/orders/index.blade.php", "<div>{{ $order->id }}</div>")
+        self.assertEqual(qa.detect_frontend(d)["frameworks"], ["livewire", "blade"])
+        self.assertIn("Livewire::test()", qa.frontend_note(qa.detect_frontend(d)))
+
+        r = self.tmpdir()
+        self.write(r, "package.json", '{"dependencies": {"react": "18"}, "devDependencies": '
+                                      '{"jest": "29", "@playwright/test": "1", "@testing-library/react": "14"}}')
+        os.makedirs(os.path.join(r, "node_modules"))
+        fe = qa.detect_frontend(r)
+        self.assertEqual((fe["frameworks"], fe["unit_runner"], fe["e2e_runner"], fe["node_modules"]),
+                         (["react"], "jest", "playwright", True))
+        self.assertNotIn("NOT installed", qa.frontend_note(fe))
+
+        self.assertIsNone(qa.detect_frontend(FIXTURE), "the checkout shop is API-only")
+
+    def test_quick_adds_frontend_lane_only_when_project_has_one(self):
+        code, out, _ = call(["plan", "--json", "--quick", "--project", DOWNLOAD_CENTRE])
+        self.assertEqual(json.loads(out)["rows"][-1]["lane"], "frontend")
+        code, out, _ = call(["plan", "--json", "--quick", "--skip", "fe", "--project", DOWNLOAD_CENTRE])
+        self.assertNotIn("frontend", [r["lane"] for r in json.loads(out)["rows"]])
+        code, out, _ = call(["plan", "--json", "--quick", "--project", FIXTURE])
+        self.assertEqual(len(json.loads(out)["rows"]), 5)
+
+    def test_lane_card_and_aliases(self):
+        lanes = qa.load_lanes()
+        for alias in ("frontend", "fe", "vue", "react", "livewire", "inertia", "js"):
+            self.assertEqual(qa.resolve_lane(alias, lanes), "frontend", alias)
+        self.assertEqual(qa.resolve_lane("ui", lanes), "ui-ux")
+        card = qa.lane_map(lanes)["frontend"]
+        self.assertEqual(card["prefix"], "FE")
+        text = " ".join(card["checklist"])
+        for topic in ("API contract", "out-of-order", "v-html", "Livewire", "Polling", "localStorage"):
+            self.assertIn(topic, text)
+
+    def test_frontend_brief_carries_stack_note_and_safety(self):
+        tmp = self.tmpdir()
+        project = os.path.join(tmp, "dc")
+        shutil.copytree(DOWNLOAD_CENTRE, project)
+        scope = os.path.join(tmp, "scope.md")
+        with open(scope, "w", encoding="utf-8") as fh:
+            fh.write("# Download centre\n\n## Frontend\nInertia + Vue page.\n")
+        self.assertEqual(call(["init", "--project", project, "--task-file", scope, "--lanes", "fe",
+                               "--depth", "1"])[0], 0)
+        self.assertEqual(call(["prompts", "hunt", "--project", project])[0], 0)
+        run_id = open(os.path.join(project, ".qa-squad", "CURRENT")).read().strip()
+        with open(os.path.join(project, ".qa-squad", run_id, "briefs", "hunt", "frontend-1.md"),
+                  encoding="utf-8") as fh:
+            brief = fh.read()
+        self.assertIn('lane "frontend"', brief)
+        self.assertIn("Frontend: inertia, vue.", brief)
+        self.assertIn("node_modules is NOT installed", brief)
+        self.assertIn("7. Never install or update dependencies", brief)
+
+    def test_gate_frontend_categories(self):
+        lanes = qa.load_lanes()
+        logic = g("FE-001", "HIGH", "CONFIRMED", lane="frontend", category="frontend",
+                  title="Invoice list never renders: paginator treated as array")
+        self.assertEqual(qa.compute_gate(gate_state(logic), lanes)["result"], "WARN")
+        xss = g("FE-002", "HIGH", "LIKELY", lane="frontend", category="authz",
+                title="Stored XSS via v-html on export label")
+        self.assertEqual(qa.compute_gate(gate_state(xss), lanes)["result"], "BLOCK")
 
 
 class TestDetectAndCli(unittest.TestCase):

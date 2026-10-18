@@ -35,11 +35,11 @@ RUNS_DIR = ".qa-squad"
 
 SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 SEV_RANK = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
-VERDICTS = ("CONFIRMED", "LIKELY", "DISPUTED", "NEEDS-ENV")
-VERDICT_RANK = {"CONFIRMED": 4, "LIKELY": 3, "NEEDS-ENV": 2, "UNVERIFIED": 1, "DISPUTED": 0}
-TESTCASE_STATUS = {"CONFIRMED": "Fail", "LIKELY": "Blocked", "NEEDS-ENV": "Not tested",
+VERDICTS = ("CONFIRMED", "LIKELY", "LATENT", "DISPUTED", "NEEDS-ENV")
+VERDICT_RANK = {"CONFIRMED": 5, "LIKELY": 4, "LATENT": 3, "NEEDS-ENV": 2, "UNVERIFIED": 1, "DISPUTED": 0}
+TESTCASE_STATUS = {"CONFIRMED": "Fail", "LIKELY": "Blocked", "LATENT": "Blocked", "NEEDS-ENV": "Not tested",
                    "UNVERIFIED": "Not tested", "DISPUTED": "Pass"}
-CATEGORIES = ("race", "authz", "integrity", "validation", "perf", "queue", "ui", "ops", "logic")
+CATEGORIES = ("race", "authz", "integrity", "validation", "perf", "queue", "ui", "frontend", "ops", "logic")
 REQUIRED_FIELDS = ("id", "lane", "title", "severity", "category", "location", "root_cause")
 # (key, heading) in the order hunters must write them.
 SECTIONS = (
@@ -147,6 +147,8 @@ You have NOT seen the hunter's reasoning; form your own.
 4. If the code path clearly allows it but you cannot reproduce it, verdict LIKELY and
    explain exactly what blocked reproduction.
 5. If it needs infrastructure you lack, verdict NEEDS-ENV and say what's needed.
+6. If the defect is real but unreachable today only because ANOTHER bug stops execution
+   first, verdict LATENT and name the masking bug: it goes live once that one is fixed.
 Race-condition claims: only CONFIRMED with a test using real parallelism.
 Never edit application source. Never touch non-test databases.
 Write .qa-squad/{run}/verdicts/{finding-id}.md using the verdict format.
@@ -163,6 +165,8 @@ SAFETY_RULES = """SAFETY RULES (hard requirements; breaking one makes your outpu
 4. No exploit tooling or scanning outside the local test app.
 5. No destructive commands (migrate:fresh on a non-test DB, rm -rf, DROP, TRUNCATE, etc.).
 6. Secrets: never print .env values into findings, tests, logs or replies.
+7. Never install or update dependencies (npm/yarn/pnpm/composer/pip install). Use only tooling already present.
+   Dev servers and browsers: localhost only, never a public interface or a remote host.
 """
 
 SCOPE_BEGIN = "-----BEGIN SCOPE.MD (verbatim copy of .qa-squad/{run}/scope.md, sha256 {sha})-----\n"
@@ -382,12 +386,14 @@ def split_list(value):
     return [v for v in re.split(r"[,\s]+", value or "") if v]
 
 
-def choose_lanes(lanes, lanes_arg=None, skip_arg=None, quick=False):
+def choose_lanes(lanes, lanes_arg=None, skip_arg=None, quick=False, has_frontend=False):
     order = [l["id"] for l in lanes]
     if lanes_arg:
         chosen = {resolve_lane(x, lanes) for x in split_list(lanes_arg)}
     elif quick:
         chosen = set(QUICK_LANES)
+        if has_frontend and "frontend" in order:
+            chosen.add("frontend")
     else:
         chosen = set(order)
     for x in split_list(skip_arg):
@@ -424,16 +430,69 @@ def deal_angles(lane_id, depth, seed=None):
 # Stack detection
 # ---------------------------------------------------------------------------
 
+def load_json_file(p):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def package_deps(path):
+    data = load_json_file(path)
+    deps = dict(data.get("dependencies", data.get("require", {})) or {})
+    deps.update(data.get("devDependencies", data.get("require-dev", {})) or {})
+    return deps
+
+
+def has_blade_views(project, limit=2000):
+    views = os.path.join(project, "resources", "views")
+    seen = 0
+    for _root, _dirs, files in os.walk(views):
+        for name in files:
+            if name.endswith(".blade.php"):
+                return True
+            seen += 1
+            if seen > limit:
+                return False
+    return False
+
+
+def detect_frontend(project):
+    """Browser-side stack, or None when the project has no frontend code."""
+    npm = package_deps(os.path.join(project, "package.json"))
+    php = package_deps(os.path.join(project, "composer.json"))
+    checks = (
+        ("inertia", any(k.startswith("@inertiajs/") for k in npm) or "inertiajs/inertia-laravel" in php),
+        ("livewire", "livewire/livewire" in php),
+        ("next", "next" in npm), ("nuxt", "nuxt" in npm), ("angular", "@angular/core" in npm),
+        ("vue", "vue" in npm), ("react", "react" in npm), ("svelte", "svelte" in npm),
+        ("alpine", "alpinejs" in npm), ("blade", has_blade_views(project)),
+    )
+    frameworks = [name for name, present in checks if present]
+    if not frameworks:
+        return None
+    unit = next((r for r in ("vitest", "jest") if r in npm), None)
+    e2e = next((r for r in ("@playwright/test", "cypress") if r in npm), None)
+    installed = os.path.isdir(os.path.join(project, "node_modules"))
+    commands = {"vitest": "npx vitest run", "jest": "npx jest"}
+    return {"frameworks": frameworks, "unit_runner": unit, "unit_command": commands.get(unit),
+            "e2e_runner": e2e.replace("@playwright/test", "playwright") if e2e else None,
+            "testing_library": any(k.startswith("@testing-library/") or k == "@vue/test-utils" for k in npm),
+            "node_modules": installed}
+
+
 def detect_stack(project):
+    info = detect_backend(project)
+    info["frontend"] = detect_frontend(project)
+    return info
+
+
+def detect_backend(project):
     def path(*parts):
         return os.path.join(project, *parts)
 
-    def load_json(p):
-        try:
-            with open(p, encoding="utf-8") as fh:
-                return json.load(fh)
-        except (OSError, ValueError):
-            return {}
+    load_json = load_json_file
 
     if os.path.isfile(path("composer.json")):
         data = load_json(path("composer.json"))
@@ -650,7 +709,8 @@ def print_plan(plan, depths):
 
 def cmd_plan(args):
     lanes = load_lanes()
-    chosen = choose_lanes(lanes, args.lanes, args.skip, args.quick)
+    chosen = choose_lanes(lanes, args.lanes, args.skip, args.quick,
+                          bool(detect_frontend(os.path.abspath(args.project))))
     depths = lane_depths(lanes, chosen, args.depth, args.quick)
     est = DEFAULT_EST_FINDINGS if args.est_findings is None else args.est_findings
     if est < 0:
@@ -670,7 +730,8 @@ def cmd_plan(args):
 def cmd_init(args):
     project = os.path.abspath(args.project)
     lanes = load_lanes()
-    chosen = choose_lanes(lanes, args.lanes, args.skip, args.quick)
+    chosen = choose_lanes(lanes, args.lanes, args.skip, args.quick,
+                          bool(detect_frontend(os.path.abspath(args.project))))
     depths = lane_depths(lanes, chosen, args.depth, args.quick)
     if not args.task_file or not os.path.isfile(args.task_file):
         raise QAError("--task-file must point to the scope.md you wrote")
@@ -699,6 +760,8 @@ def print_init(state, run_dir):
         "dir: %s" % run_dir,
         "scope sha256: %s" % state["scope_sha256"],
         "stack: %s (test command: %s)" % (state["stack"]["stack"], state["stack"]["test_command"]),
+        "frontend: %s" % (", ".join(state["stack"]["frontend"]["frameworks"])
+                          if state["stack"].get("frontend") else "none detected"),
         "lanes (%d): %s" % (len(state["lanes"]), ", ".join(state["lanes"])),
         "hunters: %d   wave: %d   verify: %s"
         % (len(state["jobs"]["hunt"]), state["wave"], "yes" if state["verify"] else "no"),
@@ -734,6 +797,7 @@ def cmd_detect(args):
     else:
         for key in ("stack", "language", "test_runner", "test_command", "evidence"):
             out("%s: %s" % (key, info[key]))
+        out("frontend: %s" % (frontend_note(info["frontend"]) if info.get("frontend") else "none detected"))
     return 0
 
 
@@ -754,6 +818,25 @@ def stack_note(ctx):
     if name != "laravel":
         note += (" This is NOT Laravel: translate every Laravel-specific technique above into its equivalent "
                  "for this stack (locks, transactions, policies, queue/HTTP fakes, test runner).")
+    fe = st.get("frontend")
+    if fe:
+        note += "\n" + frontend_note(fe)
+    return note
+
+
+def frontend_note(fe):
+    note = "Frontend: %s." % ", ".join(fe["frameworks"])
+    if fe.get("unit_runner"):
+        note += " Component tests: %s%s." % (fe["unit_command"], " + Testing Library" if fe.get("testing_library") else "")
+    if fe.get("e2e_runner"):
+        note += " E2E runner present: %s (localhost only)." % fe["e2e_runner"]
+    if not fe.get("node_modules"):
+        note += (" node_modules is NOT installed: JS tests cannot run. Do not install anything; reason statically "
+                 "(a field the component reads that the API provably never returns is a deterministic proof), "
+                 "or reproduce logic in a small standalone script under .qa-squad/<run>/tests/ with plain node if "
+                 "`node` exists.")
+    if "livewire" in fe["frameworks"]:
+        note += " Livewire components are testable from PHP with Livewire::test() when vendor/ exists."
     return note
 
 
@@ -1494,7 +1577,7 @@ def sensitivity(f):
         return "lane " + ", ".join(lanes)
     if f.get("category") in SENSITIVE_CATEGORIES:
         return "category " + f["category"]
-    if f.get("category") in ("perf", "ui", "ops"):
+    if f.get("category") in ("perf", "ui", "frontend", "ops"):
         return ""   # a slow invoice query is not a billing-correctness bug
     m = SENSITIVE_TERMS.search(" ".join((f.get("title", ""), f.get("root_cause", ""), f.get("location", ""))))
     return ("touches " + m.group(0).lower()) if m else ""
@@ -1524,7 +1607,10 @@ def compute_gate(st, lanes):
         if v == "DISPUTED":
             continue
         label = "%s %s %s: %s" % (f["id"], f["severity"], v, f["title"])
-        if v in ("CONFIRMED", "LIKELY"):
+        if v == "LATENT":
+            if f["severity"] != "LOW":
+                warn.append(label + " (latent: masked by another bug; goes live when that is fixed, re-run then)")
+        elif v in ("CONFIRMED", "LIKELY"):
             if f["severity"] == "CRITICAL":
                 block.append(label)
             elif f["severity"] == "HIGH" and is_sensitive(f):
@@ -1664,7 +1750,7 @@ def cmd_report(args):
 
     sev_counts = ", ".join("%s %d" % (s, sum(1 for f in live if f["severity"] == s)) for s in SEVERITIES)
     ver_counts = ", ".join("%s %d" % (v, sum(1 for f in finals if verdict_of(f) == v))
-                            for v in ("CONFIRMED", "LIKELY", "NEEDS-ENV", "UNVERIFIED", "DISPUTED"))
+                            for v in ("CONFIRMED", "LIKELY", "LATENT", "NEEDS-ENV", "UNVERIFIED", "DISPUTED"))
     rejected = sum(1 for f in st["findings"].values() if f["status"] == "rejected")
     merged = sum(1 for f in st["findings"].values() if f["status"] == "merged")
 

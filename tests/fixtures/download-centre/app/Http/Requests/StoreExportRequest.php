@@ -18,6 +18,7 @@ class StoreExportRequest extends FormRequest
             'filters' => ['required', 'array'],
             'filters.from' => ['required', 'date'],
             'filters.to' => ['required', 'date', 'after_or_equal:filters.from'],
+            'filters.label' => ['nullable', 'string', 'max:100'],
         ];
     }
 }

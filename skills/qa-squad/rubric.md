@@ -34,6 +34,7 @@ If more than 50% of a lane's findings are rejected, one fix-pass hunter is spawn
 |---|---|---|
 | CONFIRMED | Reproduced by a test, or observed directly | a file:line citation, plus the test path and its output |
 | LIKELY | The code path clearly allows it, but it was not reproduced | file:line of the unguarded path + what blocked reproduction |
+| LATENT | A real defect that is unreachable today only because another bug stops execution first. It goes live when that bug is fixed. Gate: always WARN (never silently passed). Test case: Blocked | file:line of the defect + the masking bug |
 | DISPUTED | The code prevents it | file:line of the guard (middleware, policy, constraint, lock, validation rule) |
 | NEEDS-ENV | Needs infrastructure the sandbox lacks | file:line + what infrastructure would settle it |
 | UNVERIFIED | `--no-verify` was used, so no skeptic ran | (none) |
@@ -46,7 +47,7 @@ If more than 50% of a lane's findings are rejected, one fix-pass hunter is spawn
 
   This is a strong signal, not proof. A test can contain a parallel construct and still test the wrong thing. A human should read the test before relying on a CONFIRMED race.
 
-Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > NEEDS-ENV > UNVERIFIED > DISPUTED.
+Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > LATENT > NEEDS-ENV > UNVERIFIED > DISPUTED.
 
 ## Dedupe (`qa.py dedupe`, deterministic)
 
@@ -82,6 +83,6 @@ The gate always lists its reasons and the coverage gaps: lanes that were skipped
 | Verdict | Test-case status |
 |---|---|
 | CONFIRMED | Fail |
-| LIKELY | Blocked |
+| LIKELY / LATENT | Blocked |
 | NEEDS-ENV / UNVERIFIED | Not tested |
 | DISPUTED | Pass |

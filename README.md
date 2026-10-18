@@ -1,10 +1,10 @@
 # qa-squad
 
-**A QA team of sub-agents for Claude Code.** Run `/qa-squad` on a feature, endpoint, PR, diff or module. Specialist sub-agents each hunt a different class of bug: functional, race conditions, data integrity, authorization/security, database, queue/cache/external services, performance, UI, ops, and a hostile "adversary". A separate **skeptic** agent then tries to disprove every finding. You get one deduplicated, severity-ranked report with reproducible test cases and a release gate verdict: **PASS / WARN / BLOCK**.
+**A QA team of sub-agents for Claude Code.** Run `/qa-squad` on a feature, page, endpoint, PR, diff or module. Specialist sub-agents each hunt a different class of bug, **backend and frontend**: functional, race conditions, data integrity, authorization/security, database, queue/cache/external services, performance, frontend (Vue/React/Inertia/Livewire/Blade), UI/UX, ops, and a hostile "adversary". A separate **skeptic** agent then tries to disprove every finding. You get one deduplicated, severity-ranked report with reproducible test cases and a release gate verdict: **PASS / WARN / BLOCK**.
 
 - Free, MIT licensed. No API key, no signup.
 - `qa.py` is Python 3.8+ standard library only. Nothing to `pip install`.
-- Laravel-first (PHP, Pest/PHPUnit, MySQL/Postgres, Redis queues). It detects Node, Django/FastAPI/Flask, Rails and Go from `package.json` / `pyproject.toml` / `Gemfile` / `go.mod` and translates the techniques for that stack.
+- Laravel-first (PHP, Pest/PHPUnit, MySQL/Postgres, Redis queues). It detects Node, Django/FastAPI/Flask, Rails and Go from `package.json` / `pyproject.toml` / `Gemfile` / `go.mod` and translates the techniques for that stack. It also detects the frontend (Inertia, Livewire, Blade, Vue, React, Svelte, Alpine, Next/Nuxt) along with its test runner (Vitest/Jest, Playwright/Cypress), and notes whether `node_modules` is installed.
 
 ## Install
 
@@ -38,8 +38,9 @@ Recommended: switch to accept-edits mode (Shift+Tab) before a run, because every
 /qa-squad                                  # scope = what you just asked about, or your uncommitted diff
 /qa-squad the checkout endpoint            # explicit target
 /qa-squad --diff main                      # everything changed vs main
-/qa-squad --quick                          # 5 core lanes, depth 1 (~30 agent calls)
+/qa-squad --quick                          # 5 core lanes (+ frontend if the project has one), depth 1 (~30 calls)
 /qa-squad --lanes race,authz app/Jobs/     # only these lanes
+/qa-squad --lanes fe,ui the download page    # frontend-only review
 /qa-squad --skip ui-ux,perf                # everything except these
 /qa-squad --depth 3                        # 3 hunters per lane, each from a different angle
 /qa-squad --no-verify                      # skip skeptics: cheaper, noisier, everything UNVERIFIED
@@ -67,7 +68,8 @@ Or just ask: *"is this production ready?"*, *"break this"*, *"find bugs in the r
    │                                                        ├ authz-security    ├ angle 4 attacker
    │                                                        ├ database          └ angle 5 historical
    │                                                        ├ queue-cache-external
-   │                                                        ├ performance · ui-ux · chaos-ops
+   │                                                        ├ performance · frontend · ui-ux
+   │                                                        ├ chaos-ops
    │                                                        └ adversary
    ▼
  VALIDATE ──── pure Python: rejects vague or malformed findings (no file:line, hedging, no trigger,
@@ -96,7 +98,8 @@ The architecture is borrowed from "arena"-style skills. A thin orchestrator prom
 | `database` | missing constraints/indexes, N+1, migrations on populated tables, deadlock/retry safety | no DB access |
 | `queue-cache-external` | retries, duplicate side effects, failed_jobs, Redis down, stale cache, webhooks, 429s | no async/integration |
 | `performance` | what falls over at 10x; static analysis and bounded measurement only, no load tests | trivial changes |
-| `ui-ux` | loading/empty/error states, double submit, back button, a11y, timezones | no UI |
+| `frontend` | API-contract mismatches (fields/pagination the UI reads but the API never returns), stale-response races, double submit, swallowed errors, client-only authorization, XSS sinks (`v-html`, `{!! !!}`), Livewire property tampering, Inertia shared-prop leaks, leaked pollers | no browser code |
+| `ui-ux` | loading/empty/error states, form errors per field, back button, session expiry, a11y, timezones | no UI |
 | `chaos-ops` | env/secrets, debug mode, deploy order, `queue:restart`, logging, alerts, rollback | pure refactor |
 | `adversary` | replay, reorder, stale tabs, direct API calls, absurd sizes, account switching | never |
 
@@ -110,9 +113,10 @@ Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (measured 
 |---|---|---|---|---|---|---|
 | `--quick --no-verify` | 5 × 1 | 5 | 0 | **5** | 1 | no |
 | `--quick` | 5 × 1 | 5 | 25 | **30** | 4 | no |
-| default, API-only (`--skip ui-ux`) | 9 × 2 | 18 | 90 | **108** | 11 | yes (> 60) |
-| full (all 10 lanes) | 10 × 2 | 20 | 100 | **120** | 12 | yes |
-| full `--depth 3` | 10 × 3 | 30 | 150 | **180** | 18 | yes |
+| `--quick` on a project with a frontend | 6 × 1 | 6 | 30 | **36** | 4 | no |
+| default, API-only (`--skip frontend,ui-ux`) | 9 × 2 | 18 | 90 | **108** | 11 | yes (> 60) |
+| full (all 11 lanes) | 11 × 2 | 22 | 110 | **132** | 14 | yes |
+| full `--depth 3` | 11 × 3 | 33 | 165 | **198** | 21 | yes |
 
 Real example: the download-centre test run (7 lanes × depth 1) used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
 
@@ -142,7 +146,7 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v      # 52 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 60 tests, stdlib only
 python3 tests/dry_run.py --keep                # full pipeline on tests/fixtures/shop with stand-in agents
 python3 skills/qa-squad/qa.py plan --quick     # cost table
 ```

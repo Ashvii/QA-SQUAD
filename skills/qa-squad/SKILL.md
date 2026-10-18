@@ -1,6 +1,6 @@
 ---
 name: qa-squad
-description: Multi-agent QA squad. Specialist sub-agents (functional, race conditions, data integrity, authz/security, database, queue/cache/external, performance, UI, ops, adversary) hunt for bugs in a feature, endpoint, PR, diff or module. A separate skeptic agent tries to disprove each finding, and the run ends in one deduplicated, severity-ranked report with reproducible test cases and a release gate (PASS/WARN/BLOCK). Use when the user asks to QA, test, harden, or review something for bugs, check race conditions or edge cases, or says "break this", "find bugs in this", or "is this production ready". When triggered automatically rather than by /qa-squad, show the cost plan and ask before spending.
+description: Multi-agent QA squad. Specialist sub-agents (functional, race conditions, data integrity, authz/security, database, queue/cache/external, performance, frontend, UI/UX, ops, adversary) hunt for backend AND frontend bugs in a feature, page, endpoint, PR, diff or module. A separate skeptic agent tries to disprove each finding, and the run ends in one deduplicated, severity-ranked report with reproducible test cases and a release gate (PASS/WARN/BLOCK). Use when the user asks to QA, test, harden, or review something for bugs, check race conditions or edge cases, or says "break this", "find bugs in this", or "is this production ready". When triggered automatically rather than by /qa-squad, show the cost plan and ask before spending.
 argument-hint: "[target] [--quick] [--lanes a,b] [--skip a,b] [--depth N] [--diff BRANCH] [--no-verify] [--wave W] [--seed S] [--rerun LANE]"
 disable-model-invocation: false
 ---
@@ -35,24 +35,26 @@ Arguments: `$ARGUMENTS`
 4. No exploit tooling, and no scanning of anything outside the local test app.
 5. No destructive commands (`migrate:fresh` on a non-test DB, `rm -rf`, `DROP`, etc.).
 6. Secrets: never print `.env` values into findings, logs, scope.md or the report.
+7. Never install or update dependencies (npm/yarn/pnpm/composer/pip). Use only tooling already present. Dev servers and browsers: localhost only.
 
 ## Step 0: SCOPE
 
 1. **Find the target**, in this order of precedence: (a) text after the command; (b) `--diff <branch>`, meaning `git diff <branch>...HEAD` plus `git diff` for uncommitted work; (c) the user's last request in the conversation; (d) the current uncommitted `git diff`. If none of these gives a testable target, ask **exactly one** clarifying question, then proceed.
 2. **Detect the stack**: run `QA detect`. The default assumption is Laravel (PHP, Pest/PHPUnit, MySQL/Postgres, Redis queues). If the project is something else, write scope.md in that stack's terms and give its exact test commands. The briefs tell agents to translate the Laravel techniques.
-3. **Read the relevant code yourself.** This is the only step where you read the code. Read routes, controllers, form requests/validators, models (fillable/guarded, casts, scopes, relationships), policies/gates, middleware, migrations, jobs, listeners, events, observers, scheduled tasks, config, and the existing tests for the area.
-4. **Write `.qa-squad/scope.draft.md`** from `templates/scope.md.tmpl`. It is the ONLY thing the sub-agents know, because they cannot see this chat. It must contain: feature summary; file paths with a one-line role each; routes and HTTP verbs; models and relationships; DB tables with constraints and indexes; jobs/queues; external services; the auth model (roles, policies, tenancy); business rules and state machines; how to run tests (exact commands); environment facts (APP_ENV, test DB name, queue driver: names only, never secret values); known gaps; and what is explicitly OUT of scope.
+3. **Read the relevant code yourself.** This is the only step where you read the code. Read routes, controllers, form requests/validators, models (fillable/guarded, casts, scopes, relationships), policies/gates, middleware, migrations, jobs, listeners, events, observers, scheduled tasks, config, and the existing tests for the area. **If the feature has a UI, also read the frontend**: Blade/Livewire views and components, Inertia pages and shared props (`HandleInertiaRequests::share`), Vue/React/Alpine components, the API client (axios/fetch), client-side validation, and polling/websocket code. Note which API calls each component makes and which response fields it reads.
+4. **Write `.qa-squad/scope.draft.md`** from `templates/scope.md.tmpl`. It is the ONLY thing the sub-agents know, because they cannot see this chat. It must contain: feature summary; file paths with a one-line role each; routes and HTTP verbs; the **frontend** (stack, pages/components with roles, the API calls and fields each one uses, auth/CSRF mechanism, frontend test commands, whether `node_modules` is installed); models and relationships; DB tables with constraints and indexes; jobs/queues; external services; the auth model (roles, policies, tenancy); business rules and state machines; how to run tests (exact commands); environment facts (APP_ENV, test DB name, queue driver: names only, never secret values); known gaps; and what is explicitly OUT of scope.
 
 ## Step 1: PLAN + CONSENT
 
-1. **Choose lanes from the scope.** Start from all ten and skip each lane whose `skip_when` (in `lanes.json`) applies:
+1. **Choose lanes from the scope.** Start from all eleven and skip each lane whose `skip_when` (in `lanes.json`) applies:
+   - `frontend`: run it whenever the scope includes browser code (Blade/Livewire views, Inertia pages, Vue/React/Svelte/Alpine). It hunts API-contract mismatches, stale-response races, client-only security, XSS sinks and leaked pollers. Skip it for API-only work.
    - `ui-ux`: skip if there are no views or components in scope.
    - `performance`: skip for trivial changes unless the user asked about it.
    - `queue-cache-external`: skip if there are no jobs, cache, webhooks or external calls.
    - `chaos-ops`: skip for a pure refactor with no config, deploy or migration impact.
    - `functional`, `authz-security` and `adversary`: almost never skip.
 
-   Flags override your choice: `--lanes` forces exactly those lanes, `--skip` removes lanes, and `--quick` uses the 5 core lanes at depth 1.
+   Flags override your choice: `--lanes` forces exactly those lanes, `--skip` removes lanes, and `--quick` uses the 5 core lanes at depth 1, plus `frontend` when `QA detect` finds a frontend (add `--skip frontend` if the change is backend-only).
 2. Run `QA plan --lanes <chosen> [--depth N] [--no-verify] [--wave W]` and show its table to the user: hunters, expected skeptics, total calls and waves.
 3. **Consent:**
    - If the skill was triggered automatically (the user did not type `/qa-squad`), **ask before spending anything**.
@@ -112,7 +114,7 @@ Then offer next steps, for example: "Fix RC-001 and I'll re-run only the race la
 | Flag | Effect |
 |---|---|
 | *(none)* | scope from the text after the command, else the last request, else the current git diff |
-| `--quick` | 5 core lanes (functional, race, integrity, authz, queue), depth 1 |
+| `--quick` | 5 core lanes (functional, race, integrity, authz, queue), depth 1, + `frontend` if the project has one |
 | `--lanes race,authz` | only these lanes (aliases: race, authz, integrity, db, queue, perf, ui, ops, adv, func) |
 | `--skip ui-ux,perf` | exclude lanes |
 | `--depth N` | hunters per lane (default 2, max 5) |
@@ -174,6 +176,8 @@ You have NOT seen the hunter's reasoning; form your own.
 4. If the code path clearly allows it but you cannot reproduce it, verdict LIKELY and
    explain exactly what blocked reproduction.
 5. If it needs infrastructure you lack, verdict NEEDS-ENV and say what's needed.
+6. If the defect is real but unreachable today only because ANOTHER bug stops execution
+   first, verdict LATENT and name the masking bug: it goes live once that one is fixed.
 Race-condition claims: only CONFIRMED with a test using real parallelism.
 Never edit application source. Never touch non-test databases.
 Write .qa-squad/{run}/verdicts/{finding-id}.md using the verdict format.
