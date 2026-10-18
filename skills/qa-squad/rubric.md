@@ -77,7 +77,7 @@ Two findings describe the same issue if any of these holds:
 
 Findings in **different files** merge only through rule 1. Two IDORs in two controllers read almost the same but need two fixes.
 
-These thresholds were calibrated on a real 7-lane run (35 findings). The earlier "same category within 10 lines" rule chained four different bugs in one 30-line `handle()` method into a single finding, hiding two real bugs. It also failed to merge same-line duplicates that lanes had labelled with different categories. The design rule is to prefer under-merging: a missed merge shows a duplicate, but a wrong merge hides a bug.
+Duplicates reported by different lanes usually cite the same line but often use different categories, while different bugs in one function sit on different lines with unrelated root causes. The design rule is to prefer under-merging: a missed merge shows a duplicate, but a wrong merge hides a bug.
 
 When findings merge, the survivor is the one with the strongest verdict, and after that the highest severity. It takes the highest severity in the group, the union of the lanes that found it (`found_by_lanes`), and a `merged_from` list. If two or more lanes found it independently, it gets the **multi-lane** badge. DISPUTED findings never merge with non-disputed ones, so a skeptic's disproof stays visible in the report.
 

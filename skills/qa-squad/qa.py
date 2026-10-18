@@ -62,13 +62,12 @@ QUICK_LANES = ("functional", "race-conditions", "data-integrity", "authz-securit
 DEFAULT_DEPTH = 2
 MAX_DEPTH = 5
 DEFAULT_WAVE = 10
-DEFAULT_EST_FINDINGS = 5   # observed: 35 valid findings from 7 real hunters
+DEFAULT_EST_FINDINGS = 5   # typical valid findings per hunter
 MAX_FINDINGS_PER_HUNTER = 8
 CONSENT_THRESHOLD = 60
 MAX_OFFERS = 3
 RETRY_REJECT_RATIO = 0.5
-# Dedupe thresholds (root-cause word overlap, Jaccard). Calibrated on a real 7-lane run: 35 findings -> 13 groups
-# with no hidden bugs, versus 16 groups with 3 real bugs hidden under the previous category/function rules.
+# Dedupe thresholds (root-cause word overlap, Jaccard).
 SPOT_LINES, SPOT_OVERLAP = 3, 0.10     # same file, within 3 lines: any shared root-cause words
 NEAR_LINES, NEAR_OVERLAP = 10, 0.30    # same file, within 10 lines, same function: clearly shared root cause
 STOPWORDS = set("the and for with from into via not only when then than this that are was has have does its any "
@@ -1504,9 +1503,9 @@ def root_overlap(a, b):
 def same_issue(a, b, func_of=None):
     """Return the rule name that makes a and b the same issue, or None.
 
-    Tuned on a real run (see rubric.md): duplicates from different lanes cite the same line but often use
-    different categories, while different bugs in one function sit on different lines with unrelated root
-    causes. Merging is deliberately conservative: a missed merge shows a duplicate, a wrong merge hides a bug.
+    Duplicates from different lanes cite the same line but often use different categories, while different
+    bugs in one function sit on different lines with unrelated root causes. Merging is deliberately
+    conservative: a missed merge shows a duplicate, a wrong merge hides a bug.
     """
     ra, rb = norm(a["root_cause"]), norm(b["root_cause"])
     if ra and ra == rb:

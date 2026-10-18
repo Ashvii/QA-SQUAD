@@ -85,7 +85,7 @@ Or just ask: *"is this production ready?"*, *"break this"*, *"find bugs in the r
  REPORT ────── REPORT.md + testcases.csv + release gate (PASS / WARN / BLOCK)
 ```
 
-The architecture is borrowed from "arena"-style skills. A thin orchestrator prompt drives a standard-library Python state machine. Sub-agents write to disk and reply with one line, so the main conversation stays small even with 100 agents. The orchestrator never opens a finding or verdict file; only `qa.py` reads them. Every step is recorded in `.qa-squad/<run>/state.json` with atomic writes. If the conversation is compacted or interrupted, `qa.py next` says exactly what to do next.
+A thin orchestrator prompt drives a standard-library Python state machine. Sub-agents write to disk and reply with one line, so the main conversation stays small even with 100 agents. The orchestrator never opens a finding or verdict file; only `qa.py` reads them. Every step is recorded in `.qa-squad/<run>/state.json` with atomic writes. If the conversation is compacted or interrupted, `qa.py next` says exactly what to do next.
 
 ## Lanes
 
@@ -107,7 +107,7 @@ Lane cards live in [`skills/qa-squad/lanes.json`](skills/qa-squad/lanes.json) an
 
 ## Cost
 
-Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (measured on a real run) (`--est-findings` changes the estimate). "Calls" means sub-agent invocations.
+Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (`--est-findings` changes the estimate). "Calls" means sub-agent invocations.
 
 | Run | Lanes × depth | Hunters | Skeptics (est.) | Calls | Waves of 10 | Asks first? |
 |---|---|---|---|---|---|---|
@@ -118,7 +118,7 @@ Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (measured 
 | full (all 11 lanes) | 11 × 2 | 22 | 110 | **132** | 14 | yes |
 | full `--depth 3` | 11 × 3 | 33 | 165 | **198** | 21 | yes |
 
-Real example: a run on a multi-tenant CSV-export feature (7 lanes × depth 1) used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
+Example: a 7-lane, depth-1 run on a multi-tenant CSV-export feature used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
 
 ## Output
 
