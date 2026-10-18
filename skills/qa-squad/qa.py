@@ -22,7 +22,6 @@ import math
 import os
 import random
 import re
-import shutil
 import string
 import sys
 import tempfile
@@ -853,7 +852,7 @@ def hunter_brief(ctx, job):
               "lane.mission": lane["mission"], "lane.checklist": checklist, "lane.techniques": techniques}
     text = fill(HUNTER_BRIEF, values)
     if job["fix"]:
-        first, rest = text.split("\n", 1)
+        rest = text.split("\n", 1)[1]
         text = ('You are a QA hunter in lane "%s" (FIX PASS: more than half of this lane\'s findings were '
                 'rejected). Angle: %s.\n' % (lane["id"], values["angle"])) + rest
     text += fill(HUNTER_BRIEF_EXTRA, values)
@@ -883,8 +882,7 @@ def hunter_brief(ctx, job):
 
 
 def finding_claim(ctx, finding):
-    fm, sections = parse_doc(read_text(ctx.abs(finding["file"])))
-    sec = keyed_sections(sections)
+    sec = keyed_sections(parse_doc(read_text(ctx.abs(finding["file"])))[1])
     return {"title": finding["title"], "severity": finding["severity"], "lane": finding["lane"],
             "location": finding["location"], "what": strip_comments(sec.get("what", "")),
             "trigger": strip_comments(sec.get("trigger", ""))}
@@ -1223,7 +1221,7 @@ def check_finding(project, fm, sections, lanes):
         return "%s finding without file:line evidence in 'Why'" % severity, None
     category = fm["category"].strip().lower()
     record = {"lane": lane_id, "title": fm["title"].strip(), "severity": severity,
-              "orig_severity": severity, "category": category if category in CATEGORIES else category,
+              "orig_severity": severity, "category": category,
               "location": "%s:%d" % (path, line), "path": path, "line": line,
               "root_cause": fm["root_cause"].strip(), "status": "new", "verdict": None,
               "verdict_note": "", "verdict_evidence": "", "verdict_reason": "", "verdict_needs": "",
@@ -1806,7 +1804,7 @@ def auto_scaling(timed):
         size = float(m.group("num")) * {"k": 1e3, "m": 1e6}.get(m.group("unit").lower(), 1)
         groups.setdefault((m.group("base").strip("-_ "), r.get("kind")), []).append((size, r))
     rows = []
-    for (base, _kind), items in sorted(groups.items()):
+    for _group, items in sorted(groups.items()):
         sizes = sorted(items, key=lambda x: x[0])
         (s_small, small), (s_large, large) = sizes[0], sizes[-1]
         if s_large <= s_small:

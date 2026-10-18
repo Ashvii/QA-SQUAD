@@ -988,7 +988,7 @@ class TestEndToEnd(Base):
 
     def test_no_verify_run(self):
         dry_run.init_run(self.project, None, None, extra=["--quick", "--no-verify"])
-        transcript, report_out = dry_run.drive(self.project)
+        transcript, _ = dry_run.drive(self.project)
         run_dir, st = dry_run.current_state(self.project)
         self.assertFalse(any("verify" in line for line in transcript if line.startswith("~")))
         self.assertTrue(all(f["verdict"] == "UNVERIFIED" for f in st["findings"].values() if f["status"] == "final"))
@@ -1039,11 +1039,11 @@ class TestFrontend(unittest.TestCase):
         self.assertIsNone(qa.detect_frontend(FIXTURE), "the checkout shop is API-only")
 
     def test_quick_adds_frontend_lane_only_when_project_has_one(self):
-        code, out, _ = call(["plan", "--json", "--quick", "--project", DOWNLOAD_CENTRE])
+        _, out, _ = call(["plan", "--json", "--quick", "--project", DOWNLOAD_CENTRE])
         self.assertEqual(json.loads(out)["rows"][-1]["lane"], "frontend")
-        code, out, _ = call(["plan", "--json", "--quick", "--skip", "fe", "--project", DOWNLOAD_CENTRE])
+        _, out, _ = call(["plan", "--json", "--quick", "--skip", "fe", "--project", DOWNLOAD_CENTRE])
         self.assertNotIn("frontend", [r["lane"] for r in json.loads(out)["rows"]])
-        code, out, _ = call(["plan", "--json", "--quick", "--project", FIXTURE])
+        _, out, _ = call(["plan", "--json", "--quick", "--project", FIXTURE])
         self.assertEqual(len(json.loads(out)["rows"]), 5)
 
     def test_lane_card_and_aliases(self):
@@ -1197,7 +1197,7 @@ class TestBench(unittest.TestCase):
             with open(os.path.join(self.tmp, name), "w") as fh:
                 json.dump(dict(base, label=name, p95_ms=p95), fh)
         for large, expected in (("lin.json", "linear"), ("sup.json", "superlinear")):
-            code, text, err = self.bench("compare", os.path.join(self.tmp, "s.json"), os.path.join(self.tmp, large),
+            code, _, err = self.bench("compare", os.path.join(self.tmp, "s.json"), os.path.join(self.tmp, large),
                                          "--size-small", "1000", "--size-large", "10000",
                                          "--out", os.path.join(self.tmp, "cmp-" + large))
             self.assertEqual(code, 0, err)

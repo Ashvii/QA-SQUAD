@@ -153,6 +153,8 @@ python3 skills/qa-squad/qa.py plan --quick     # cost table
 
 `tests/fixtures/shop` is a tiny Laravel shop with three planted bugs: a non-atomic stock decrement, an IDOR on order show, and a non-idempotent payment webhook. `tests/standin.py` plays the sub-agents. It reads the same briefs a real agent would and writes canned findings and verdicts with real file:line citations. The dry run flags all three bugs and the gate says BLOCK.
 
+`tests/fixtures/download-centre` is a larger, multi-tenant Laravel + Inertia/Vue feature used to evaluate the skill with **real** sub-agents. It contains backend, frontend and performance bugs plus decoys. The answer key is kept outside the fixture, in `tests/fixtures/download-centre.ANSWERS.md`, so agents running on a copy never see it. To evaluate, copy the folder somewhere, run `/qa-squad` on it, and score `REPORT.md` against the key. The unit tests also use it for frontend detection.
+
 The release gate, the severity definitions and the validation rules are in [`skills/qa-squad/rubric.md`](skills/qa-squad/rubric.md).
 
 ## Fine print

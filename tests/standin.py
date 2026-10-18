@@ -349,7 +349,6 @@ def decide(project, run_rel, text):
     """Default stand-in skeptic: canned decisions keyed on the claim, with real file:line evidence."""
     fid = claim_field(text, "Finding ID")
     title = claim_field(text, "Title").lower()
-    lane = claim_field(text, "Lane").split()[0] if claim_field(text, "Lane") else ""
     location = claim_field(text, "Location")
     if "quantity 0" in title:
         return verdict_md(fid, "DISPUTED", at(project, REQUEST, "'min:1'"),
