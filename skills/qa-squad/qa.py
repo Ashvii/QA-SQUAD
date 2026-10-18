@@ -62,12 +62,17 @@ QUICK_LANES = ("functional", "race-conditions", "data-integrity", "authz-securit
 DEFAULT_DEPTH = 2
 MAX_DEPTH = 5
 DEFAULT_WAVE = 10
-DEFAULT_EST_FINDINGS = 3
+DEFAULT_EST_FINDINGS = 5   # observed: 35 valid findings from 7 real hunters
 MAX_FINDINGS_PER_HUNTER = 8
 CONSENT_THRESHOLD = 60
 MAX_OFFERS = 3
 RETRY_REJECT_RATIO = 0.5
-NEARBY_TEXT_RATIO = 0.5   # nearby findings with no known enclosing function must be at least this similar
+# Dedupe thresholds (root-cause word overlap, Jaccard). Calibrated on a real 7-lane run: 35 findings -> 13 groups
+# with no hidden bugs, versus 16 groups with 3 real bugs hidden under the previous category/function rules.
+SPOT_LINES, SPOT_OVERLAP = 3, 0.10     # same file, within 3 lines: any shared root-cause words
+NEAR_LINES, NEAR_OVERLAP = 10, 0.30    # same file, within 10 lines, same function: clearly shared root cause
+STOPWORDS = set("the and for with from into via not only when then than this that are was has have does its any "
+                "every each all which while same job".split())
 SENSITIVE_LANES = ("race-conditions", "authz-security", "data-integrity")
 SENSITIVE_CATEGORIES = ("race", "authz", "integrity")
 SENSITIVE_TERMS = re.compile(
@@ -766,7 +771,7 @@ def hunter_brief(ctx, job):
         text = ('You are a QA hunter in lane "%s" (FIX PASS: more than half of this lane\'s findings were '
                 'rejected). Angle: %s.\n' % (lane["id"], values["angle"])) + rest
     text += fill(HUNTER_BRIEF_EXTRA, values)
-    parts = [text, "", "Evidence standard for this lane: %s" % lane.get("evidence_standard", ""),
+    parts = [text, "", root_note(ctx), "Evidence standard for this lane: %s" % lane.get("evidence_standard", ""),
              stack_note(ctx), ""]
     if job["fix"]:
         parts += ["WHY YOU WERE SPAWNED: these findings from your lane were rejected by qa.py validate. "
@@ -801,7 +806,7 @@ def skeptic_brief(ctx, job):
     finding = ctx.state["findings"][job["finding_id"]]
     claim = finding_claim(ctx, finding)
     values = {"run": ctx.run_id, "finding-id": finding["id"]}
-    parts = [fill(SKEPTIC_BRIEF, values), "",
+    parts = [fill(SKEPTIC_BRIEF, values), "", root_note(ctx), "",
              "THE CLAIM",
              "Finding ID: %s" % finding["id"],
              "Lane: %s   Claimed severity: %s" % (claim["lane"], claim["severity"]),
@@ -833,9 +838,15 @@ def write_brief(ctx, kind, job):
     atomic_write(ctx.abs(job["brief_path"]), text)
 
 
+def root_note(ctx):
+    return ("PROJECT ROOT: %s\nEvery relative path in this brief (including .qa-squad/...) is relative to that "
+            "directory. Resolve paths against it, whatever your current working directory is." % ctx.project)
+
+
 def agent_call(ctx, kind, job):
+    brief = ctx.abs(job["brief_path"])
     return {"id": job["id"], "description": "qa %s %s" % (kind, job["id"]), "brief": job["brief_path"],
-            "prompt": "Read %s and follow it exactly. Reply with ONE line only." % job["brief_path"]}
+            "prompt": "Read %s and follow it exactly. Reply with ONE line only." % brief}
 
 
 def print_waves(ctx, kind, jobs):
@@ -1356,26 +1367,40 @@ def text_ratio(a, b):
                                    norm(b["title"] + " " + b["root_cause"])).ratio()
 
 
+def tokens(text):
+    words = re.findall(r"[a-z0-9_]+", (text or "").lower())
+    return {w for w in words if (len(w) > 2 or w.isdigit()) and w not in STOPWORDS}
+
+
+def root_overlap(a, b):
+    """Jaccard overlap of the significant words in two root causes (0..1)."""
+    ta, tb = tokens(a["root_cause"]), tokens(b["root_cause"])
+    return len(ta & tb) / float(len(ta | tb) or 1)
+
+
 def same_issue(a, b, func_of=None):
     """Return the rule name that makes a and b the same issue, or None.
 
-    `func_of(finding)` returns the enclosing function name (or None). Nearby findings in the same category
-    only merge if they are in the same function; when the function is unknown, their wording must be similar.
+    Tuned on a real run (see rubric.md): duplicates from different lanes cite the same line but often use
+    different categories, while different bugs in one function sit on different lines with unrelated root
+    causes. Merging is deliberately conservative: a missed merge shows a duplicate, a wrong merge hides a bug.
     """
     ra, rb = norm(a["root_cause"]), norm(b["root_cause"])
     if ra and ra == rb:
         return "same-root-cause"
-    if a["path"] == b["path"]:
-        if abs(a["line"] - b["line"]) <= 10 and a["category"] == b["category"]:
-            fa = func_of(a) if func_of else None
-            fb = func_of(b) if func_of else None
-            if fa and fb:
-                if fa == fb:
-                    return "same-function"
-            elif text_ratio(a, b) >= NEARBY_TEXT_RATIO:
-                return "same-file-nearby"
-        if text_ratio(a, b) >= 0.75:
-            return "fuzzy-title"
+    if a["path"] != b["path"]:
+        return None
+    distance = abs(a["line"] - b["line"])
+    overlap = root_overlap(a, b)
+    if distance <= SPOT_LINES and overlap >= SPOT_OVERLAP:
+        return "same-spot"
+    if distance <= NEAR_LINES and overlap >= NEAR_OVERLAP:
+        fa = func_of(a) if func_of else None
+        fb = func_of(b) if func_of else None
+        if not (fa and fb) or fa == fb:
+            return "same-function"
+    if text_ratio(a, b) >= 0.75:
+        return "fuzzy-title"
     return None
 
 
@@ -1469,6 +1494,8 @@ def sensitivity(f):
         return "lane " + ", ".join(lanes)
     if f.get("category") in SENSITIVE_CATEGORIES:
         return "category " + f["category"]
+    if f.get("category") in ("perf", "ui", "ops"):
+        return ""   # a slow invoice query is not a billing-correctness bug
     m = SENSITIVE_TERMS.search(" ".join((f.get("title", ""), f.get("root_cause", ""), f.get("location", ""))))
     return ("touches " + m.group(0).lower()) if m else ""
 

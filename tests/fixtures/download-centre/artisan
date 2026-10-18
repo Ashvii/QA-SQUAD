@@ -1,0 +1,3 @@
+#!/usr/bin/env php
+<?php
+// Fixture stub: there is no vendor/ directory, so Laravel cannot boot here.

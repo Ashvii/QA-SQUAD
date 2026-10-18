@@ -108,23 +108,28 @@ class TestPlan(Base):
 
     def test_quick(self):
         p = self.plan("--quick")
-        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (5, 5, 15, 20))
-        self.assertEqual((p["hunt_waves"], p["verify_waves"], p["waves"]), (1, 2, 3))
+        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (5, 5, 25, 30))
+        self.assertEqual((p["hunt_waves"], p["verify_waves"], p["waves"]), (1, 3, 4))
         self.assertFalse(p["needs_consent"])
 
     def test_default_all_lanes(self):
         p = self.plan()
-        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (10, 20, 60, 80))
-        self.assertEqual(p["waves"], 2 + 6)
+        self.assertEqual((p["lanes"], p["hunters"], p["skeptics"], p["total"]), (10, 20, 100, 120))
+        self.assertEqual(p["waves"], 2 + 10)
         self.assertTrue(p["needs_consent"])
 
     def test_aliases_and_depth(self):
         p = self.plan("--lanes", "race,authz,queue,db,perf", "--depth", "3")
         self.assertEqual([r["lane"] for r in p["rows"]],
                          ["race-conditions", "authz-security", "database", "queue-cache-external", "performance"])
-        self.assertEqual((p["hunters"], p["skeptics"], p["total"]), (15, 45, 60))
+        self.assertEqual((p["hunters"], p["skeptics"], p["total"]), (15, 75, 90))
+        self.assertTrue(p["needs_consent"])
+        self.assertEqual((p["hunt_waves"], p["verify_waves"]), (2, 8))
+        p = self.plan("--lanes", "race,authz,queue", "--depth", "2", "--est-findings", "4")
+        self.assertEqual(p["total"], 6 + 24)
+        p = self.plan("--lanes", "race,authz,queue,db,perf", "--depth", "2", "--est-findings", "5")
+        self.assertEqual(p["total"], 60)
         self.assertFalse(p["needs_consent"], "exactly 60 calls does not need consent")
-        self.assertEqual((p["hunt_waves"], p["verify_waves"]), (2, 5))
 
     def test_no_verify_and_skip_and_estimate(self):
         p = self.plan("--skip", "ui-ux", "--depth", "1", "--no-verify")
@@ -134,7 +139,7 @@ class TestPlan(Base):
 
     def test_wave_size(self):
         p = self.plan("--quick", "--wave", "2")
-        self.assertEqual((p["hunt_waves"], p["verify_waves"]), (3, 8))
+        self.assertEqual((p["hunt_waves"], p["verify_waves"]), (3, 13))
 
     def test_rejects_bad_input(self):
         self.assertIn("--depth", self.qa_fail("plan", "--depth", "6"))
@@ -148,8 +153,8 @@ class TestPlan(Base):
 
     def test_text_table(self):
         out = self.qa("plan", "--quick")
-        self.assertIn("sub-agent calls (expected): 20 = 5 hunters + 15 skeptics", out)
-        self.assertIn("waves: 3 (1 hunt + 2 verify", out)
+        self.assertIn("sub-agent calls (expected): 30 = 5 hunters + 25 skeptics", out)
+        self.assertIn("waves: 4 (1 hunt + 3 verify", out)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +456,8 @@ class TestDedupe(Base):
                "LIKELY", "CRITICAL"),
             mk("DI-001", "data-integrity", "app/Other.php", 5, "integrity", "Negative stock",
                "Non-atomic  decrement on STOCK.", "CONFIRMED", "HIGH"),                       # rule 1
-            mk("DB-001", "database", C, 31, "race", "No row lock", "missing lockForUpdate", "LIKELY", "MEDIUM"),
+            mk("DB-001", "database", C, 31, "race", "No row lock", "decrement on stock without lockForUpdate",
+               "LIKELY", "MEDIUM"),
             mk("AZ-001", "authz-security", O, 30, "authz", "Any user can read another user's order",
                "missing ownership check in show", "CONFIRMED", "CRITICAL"),
             mk("AD-001", "adversary", O, 90, "logic", "Any user can read another user's order by id",
@@ -487,15 +493,72 @@ class TestDedupe(Base):
         unknown_fn = lambda f: None  # noqa: E731
         self.assertEqual(qa.same_issue(a, mk("B", "y", "g.php", 99, "authz", "Other", "Root ONE!", "LIKELY", "LOW")),
                          "same-root-cause")
-        b = mk("B", "y", "f.php", 20, "race", "Other", "x", "LIKELY", "LOW")
+        a = mk("A", "x", "f.php", 10, "race", "Title one", "stock decrement is not atomic", "LIKELY", "LOW")
+        # within 10 lines + same function needs a clearly shared root cause; category no longer matters
+        b = mk("B", "y", "f.php", 18, "integrity", "Other", "atomic stock decrement missing", "LIKELY", "LOW")
         self.assertEqual(qa.same_issue(a, b, same_fn), "same-function")
+        self.assertEqual(qa.same_issue(a, b, unknown_fn), "same-function", "unknown function falls back to wording")
         self.assertIsNone(qa.same_issue(a, b, lambda f: "store" if f["id"] == "A" else "update"),
                           "nearby but in different functions")
-        self.assertIsNone(qa.same_issue(a, b, unknown_fn), "unknown function and dissimilar wording")
-        c = mk("C", "y", "f.php", 20, "race", "Title one again", "root one, twice", "LIKELY", "LOW")
-        self.assertEqual(qa.same_issue(a, c, unknown_fn), "same-file-nearby", "unknown function, similar wording")
-        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 21, "race", "Other", "x", "LIKELY", "LOW"), same_fn))
-        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 12, "authz", "Other", "x", "LIKELY", "LOW"), same_fn))
+        unrelated = mk("C", "y", "f.php", 18, "race", "Other", "missing failed() handler", "LIKELY", "LOW")
+        self.assertIsNone(qa.same_issue(a, unrelated, same_fn), "same function, unrelated root cause")
+        # within 3 lines: any shared root-cause word is enough
+        spot = mk("D", "y", "f.php", 12, "perf", "Other", "decrement uses stale read", "LIKELY", "LOW")
+        self.assertEqual(qa.same_issue(a, spot, same_fn), "same-spot")
+        far = mk("E", "y", "f.php", 21, "race", "Other", "stock decrement is atomic-ish", "LIKELY", "LOW")
+        self.assertNotIn(qa.same_issue(a, far, same_fn), ("same-spot", "same-function"), "more than 10 lines apart")
+        # different files never merge on wording alone (two IDORs in two controllers need two fixes)
+        self.assertIsNone(qa.same_issue(
+            mk("F", "x", "app/OrderController.php", 30, "authz", "IDOR", "show() loads any order by id without an "
+               "ownership check", "LIKELY", "LOW"),
+            mk("G", "x", "app/InvoiceController.php", 30, "authz", "IDOR", "show() loads any invoice by id without "
+               "an ownership check", "LIKELY", "LOW")))
+
+    def test_real_run_regression(self):
+        """Root causes from a real 7-lane run on the download-centre fixture.
+
+        handle() holds four different bugs within 13 lines; the old category/same-function rule chained them all
+        into one finding. Same-line duplicates from different lanes used different categories and did not merge.
+        """
+        J = "app/Jobs/GenerateExportJob.php"
+        P = "routes/console.php"
+        self.source(J, "<?php\nclass GenerateExportJob\n{\n    public function handle(): void\n    {\n"
+                    + "        //\n" * 40 + "    }\n}\n")
+        self.source(P, "<?php\n" + "//\n" * 20)
+        rows = [
+            ("DI-001", "data-integrity", J, 33, "integrity", "BelongsToTenant global scope only applies when "
+             "currentTenantId is bound, and nothing binds it inside the queue worker"),
+            ("QC-001", "queue-cache-external", J, 33, "queue", "tenant global scope depends on currentTenantId, "
+             "which only SetTenant middleware binds; the queue worker never binds it"),
+            ("AZ-002", "authz-security", J, 33, "authz", "tenant scope depends on the request-only currentTenantId "
+             "binding, which is never set in the Redis queue worker"),
+            ("DI-002", "data-integrity", J, 42, "integrity", "CSV opened in append mode ('a') at a deterministic "
+             "path, so each retry or overlapping attempt appends to the previous file"),
+            ("QC-002", "queue-cache-external", J, 42, "queue", "CSV opened in append mode ('a') at a deterministic "
+             "path, so every attempt appends to the previous attempt's partial file"),
+            ("DI-003", "data-integrity", J, 29, "integrity", "job sets status=processing but has no failed() handler "
+             "or catch block to set a terminal failed state"),
+            ("FN-003", "functional", J, 29, "logic", "job sets status=processing first and has no failed() handler "
+             "or try/catch to set a terminal failed status"),
+            ("PF-001", "performance", J, 36, "perf", "unbounded Invoice::query()->get() materialises the full "
+             "result set as Eloquent models before writing the CSV"),
+            ("FN-007", "functional", J, 36, "perf", "->get() hydrates the entire result set as Eloquent models "
+             "instead of streaming with cursor()/lazy()"),
+            ("DI-004", "data-integrity", P, 8, "integrity", "Builder::each() paginates with offset (chunk) while the "
+             "callback deletes rows from the same result set"),
+            ("AD-006", "adversary", P, 8, "logic", "Builder::each() chunks with LIMIT/OFFSET while the callback "
+             "deletes rows from the same result set"),
+            ("PF-004", "performance", P, 8, "perf", "Builder::each() pages with LIMIT/OFFSET while the callback "
+             "deletes rows from the same result set; also no index on created_at"),
+        ]
+        fs = self.dedupe([mk(i, lane, path, line, cat, "t " + i, root, "CONFIRMED", "HIGH")
+                          for i, lane, path, line, cat, root in rows])
+        groups = {}
+        for f in fs.values():
+            groups.setdefault(f.get("merged_into") or f["id"], set()).add(f["id"])
+        expected = [{"AZ-002", "DI-001", "QC-001"}, {"DI-002", "QC-002"}, {"DI-003", "FN-003"},
+                    {"FN-007", "PF-001"}, {"AD-006", "DI-004", "PF-004"}]
+        self.assertEqual(sorted(map(sorted, groups.values())), sorted(map(sorted, expected)))
 
     def test_nearby_bugs_in_different_methods_stay_separate(self):
         T = "app/Http/Controllers/TeamController.php"
@@ -512,13 +575,13 @@ class TestDedupe(Base):
         T = "app/Http/Controllers/TeamController.php"
         self.source(T, TWO_METHODS_SRC)
         fs = self.dedupe([
-            mk("AZ-001", "authz-security", T, 11, "authz", "Update loads any team", "no ownership check",
-               "LIKELY", "HIGH"),
-            mk("AD-001", "adversary", T, 12, "authz", "Editing someone else's team", "missing policy on update",
-               "LIKELY", "MEDIUM"),
+            mk("AZ-001", "authz-security", T, 11, "authz", "Update loads any team",
+               "update() has no ownership check", "LIKELY", "HIGH"),
+            mk("AD-001", "adversary", T, 12, "logic", "Editing someone else's team",
+               "missing ownership check in update()", "LIKELY", "MEDIUM"),
         ])
         self.assertEqual(fs["AZ-001"]["merged_from"], ["AD-001"])
-        self.assertEqual(self.state()["dedupe_rules"], ["AD-001 ~ AZ-001 (same-function)"])
+        self.assertEqual(self.state()["dedupe_rules"], ["AD-001 ~ AZ-001 (same-spot)"])
 
     def test_enclosing_function_detection(self):
         self.source("app/x.py", "class A:\n    def first(self):\n        pass\n\n    async def second(self):\n        x = 1\n")
@@ -701,6 +764,9 @@ class TestGate(unittest.TestCase):
         self.assertEqual(r["result"], "BLOCK")
         self.assertIn("touches refund", r["reasons"][0])
         self.assertEqual(self.gate(g("X-001", "HIGH", "LIKELY", root="tenant scope bypassed"))["result"], "BLOCK")
+        # a slow query in an invoicing app is not a billing-correctness bug
+        self.assertEqual(self.gate(g("X-001", "HIGH", "CONFIRMED", category="perf",
+                                     title="Invoice export query does a full table scan"))["result"], "WARN")
 
     def test_warn_cases(self):
         self.assertEqual(self.gate(g("X-001", "HIGH", "NEEDS-ENV", lane="race-conditions"))["result"], "WARN")
@@ -938,7 +1004,7 @@ class TestDetectAndCli(unittest.TestCase):
         proc = subprocess.run([sys.executable, os.path.join(SKILL, "qa.py"), "plan", "--quick"],
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("sub-agent calls (expected): 20", proc.stdout)
+        self.assertIn("sub-agent calls (expected): 30", proc.stdout)
         proc = subprocess.run([sys.executable, os.path.join(SKILL, "qa.py"), "next", "--project", tempfile.gettempdir(),
                                "--run", "does-not-exist"], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 2)

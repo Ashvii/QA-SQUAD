@@ -99,7 +99,7 @@ def f_stock_db(p):
     return finding_md(
         "database", "Stock decrement runs without a row lock or a conditional UPDATE", "MEDIUM", "race",
         at(p, CHECKOUT, "if ($product->stock < $quantity)"),
-        "no lockForUpdate or conditional UPDATE when decrementing stock",
+        "stock check and decrement are not atomic: no lockForUpdate or conditional UPDATE",
         "The database does not defend the stock invariant, so concurrent writers can corrupt it.",
         "- %s checks stock in PHP, outside any lock\n- %s stock is a signed integer with no CHECK constraint" % (
             at(p, CHECKOUT, "if ($product->stock < $quantity)"), at(p, MIGRATION, "$table->integer('stock')")),

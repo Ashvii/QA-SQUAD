@@ -53,8 +53,13 @@ Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > NEEDS-ENV > UN
 Two findings describe the same issue if any of these holds:
 
 1. their `root_cause` values are identical after normalising case, whitespace and punctuation;
-2. they are in the same file, at most 10 lines apart, with the same `category`, **and** inside the same function or method (found by scanning upward from each line for the nearest `function` / `def` / `func` declaration). If either function can't be determined (for example, an arrow function or a config file), their title + root_cause must instead be at least 50% similar. This stops two different bugs in neighbouring methods, such as an IDOR in `show()` and mass assignment in `update()`, from being merged;
-3. they are in the same file and `difflib` gives a similarity of at least 0.75 for title + root_cause.
+2. **same spot**: they are in the same file, at most 3 lines apart, and their root causes share at least some significant words (word overlap ≥ 0.10). Category does not matter: different lanes label the same bug `queue`, `integrity` or `perf`;
+3. **same function**: they are in the same file, at most 10 lines apart, inside the same function or method (found by scanning upward for the nearest `function` / `def` / `func`; unknown counts as a match), and their root causes clearly overlap (≥ 0.30);
+4. **fuzzy title**: they are in the same file and `difflib` gives a similarity of at least 0.75 for title + root_cause.
+
+Findings in **different files** merge only through rule 1. Two IDORs in two controllers read almost the same but need two fixes.
+
+These thresholds were calibrated on a real 7-lane run (35 findings). The earlier "same category within 10 lines" rule chained four different bugs in one 30-line `handle()` method into a single finding, hiding two real bugs. It also failed to merge same-line duplicates that lanes had labelled with different categories. The design rule is to prefer under-merging: a missed merge shows a duplicate, but a wrong merge hides a bug.
 
 When findings merge, the survivor is the one with the strongest verdict, and after that the highest severity. It takes the highest severity in the group, the union of the lanes that found it (`found_by_lanes`), and a `merged_from` list. If two or more lanes found it independently, it gets the **multi-lane** badge. DISPUTED findings never merge with non-disputed ones, so a skeptic's disproof stays visible in the report.
 
@@ -64,7 +69,7 @@ Disputed findings are ignored. Every other final finding is checked:
 
 **BLOCK RELEASE** if any finding that is CONFIRMED or LIKELY is
 - CRITICAL, in any lane; or
-- HIGH, and in `race-conditions`, `authz-security` or `data-integrity` (by lane or category), or about payments, billing, inventory/stock or tenant isolation.
+- HIGH, and in `race-conditions`, `authz-security` or `data-integrity` (by lane or category), or about payments, billing, inventory/stock or tenant isolation. The topic check is skipped for `perf`, `ui` and `ops` findings: a slow invoice query is not a billing-correctness bug.
 
 **WARN** if no finding blocks but MEDIUM findings remain, a non-sensitive HIGH is CONFIRMED or LIKELY, or any HIGH or CRITICAL is only NEEDS-ENV or UNVERIFIED.
 

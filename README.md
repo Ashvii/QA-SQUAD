@@ -38,7 +38,7 @@ Recommended: switch to accept-edits mode (Shift+Tab) before a run, because every
 /qa-squad                                  # scope = what you just asked about, or your uncommitted diff
 /qa-squad the checkout endpoint            # explicit target
 /qa-squad --diff main                      # everything changed vs main
-/qa-squad --quick                          # 5 core lanes, depth 1 (~20 agent calls)
+/qa-squad --quick                          # 5 core lanes, depth 1 (~30 agent calls)
 /qa-squad --lanes race,authz app/Jobs/     # only these lanes
 /qa-squad --skip ui-ux,perf                # everything except these
 /qa-squad --depth 3                        # 3 hunters per lane, each from a different angle
@@ -104,17 +104,17 @@ Lane cards live in [`skills/qa-squad/lanes.json`](skills/qa-squad/lanes.json) an
 
 ## Cost
 
-Numbers from `qa.py plan`, assuming about 3 valid findings per hunter (`--est-findings` changes the estimate). "Calls" means sub-agent invocations.
+Numbers from `qa.py plan`, assuming about 5 valid findings per hunter (measured on a real run) (`--est-findings` changes the estimate). "Calls" means sub-agent invocations.
 
 | Run | Lanes × depth | Hunters | Skeptics (est.) | Calls | Waves of 10 | Asks first? |
 |---|---|---|---|---|---|---|
 | `--quick --no-verify` | 5 × 1 | 5 | 0 | **5** | 1 | no |
-| `--quick` | 5 × 1 | 5 | 15 | **20** | 3 | no |
-| default, API-only (`--skip ui-ux`) | 9 × 2 | 18 | 54 | **72** | 8 | yes (> 60) |
-| full (all 10 lanes) | 10 × 2 | 20 | 60 | **80** | 8 | yes |
-| full `--depth 3` | 10 × 3 | 30 | 90 | **120** | 12 | yes |
+| `--quick` | 5 × 1 | 5 | 25 | **30** | 4 | no |
+| default, API-only (`--skip ui-ux`) | 9 × 2 | 18 | 90 | **108** | 11 | yes (> 60) |
+| full (all 10 lanes) | 10 × 2 | 20 | 100 | **120** | 12 | yes |
+| full `--depth 3` | 10 × 3 | 30 | 150 | **180** | 18 | yes |
 
-In practice the orchestrator usually skips 2-4 lanes based on the scope, so a typical default run lands around 40-60 calls. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
+Real example: the download-centre test run (7 lanes × depth 1) used **42 calls**: 7 hunters, then 35 skeptics for 35 findings, which deduped to 13 unique bugs. Retries (fix passes and re-queued verdicts) are bounded; `plan` prints the upper bound.
 
 ## Output
 
@@ -142,7 +142,7 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v      # 51 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 52 tests, stdlib only
 python3 tests/dry_run.py --keep                # full pipeline on tests/fixtures/shop with stand-in agents
 python3 skills/qa-squad/qa.py plan --quick     # cost table
 ```
