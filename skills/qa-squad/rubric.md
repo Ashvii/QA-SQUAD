@@ -39,7 +39,12 @@ If more than 50% of a lane's findings are rejected, one fix-pass hunter is spawn
 | UNVERIFIED | `--no-verify` was used, so no skeptic ran | (none) |
 
 - A verdict without any `file:line` is rejected. The finding is re-queued once. If the second verdict is also invalid, the finding becomes NEEDS-ENV.
-- **Race rule:** a `race-conditions` finding (or any finding with `category: race`) can only be CONFIRMED by a test that uses real parallelism: separate processes or separate DB connections released together by a barrier. The verdict must set `parallel_test: yes`. Otherwise qa.py downgrades CONFIRMED to LIKELY. Calling an endpoint twice in sequence does not reproduce a race.
+- **Race rule:** a `race-conditions` finding (or any finding with `category: race`) can only be CONFIRMED by a test that uses real parallelism: separate processes or separate DB connections released together by a barrier. Calling an endpoint twice in sequence does not reproduce a race. qa.py checks the evidence rather than trusting the skeptic's word. A race CONFIRMED is downgraded to LIKELY, with the reason recorded, unless all of these hold:
+  1. the verdict sets `parallel_test: yes`;
+  2. `test:` names a file that exists inside `.qa-squad/<run>/tests/` (a test elsewhere does not count);
+  3. that file uses a real parallel construct, such as `Process::pool`, `Concurrency::run`, `pcntl_fork`, `proc_open` or `Http::pool` in PHP; `multiprocessing`, `ThreadPoolExecutor` or `asyncio.gather` in Python; `Promise.all`, `child_process` or `worker_threads` in JS; `Thread.new` or `fork` in Ruby; `go func` or `sync.WaitGroup` in Go.
+
+  This is a strong signal, not proof. A test can contain a parallel construct and still test the wrong thing. A human should read the test before relying on a CONFIRMED race.
 
 Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > NEEDS-ENV > UNVERIFIED > DISPUTED.
 
@@ -48,7 +53,7 @@ Verdict strength, from strongest to weakest: CONFIRMED > LIKELY > NEEDS-ENV > UN
 Two findings describe the same issue if any of these holds:
 
 1. their `root_cause` values are identical after normalising case, whitespace and punctuation;
-2. they are in the same file, at most 10 lines apart, with the same `category`;
+2. they are in the same file, at most 10 lines apart, with the same `category`, **and** inside the same function or method (found by scanning upward from each line for the nearest `function` / `def` / `func` declaration). If either function can't be determined (for example, an arrow function or a config file), their title + root_cause must instead be at least 50% similar. This stops two different bugs in neighbouring methods, such as an IDOR in `show()` and mass assignment in `update()`, from being merged;
 3. they are in the same file and `difflib` gives a similarity of at least 0.75 for title + root_cause.
 
 When findings merge, the survivor is the one with the strongest verdict, and after that the highest severity. It takes the highest severity in the group, the union of the lanes that found it (`found_by_lanes`), and a `merged_from` list. If two or more lanes found it independently, it gets the **multi-lane** badge. DISPUTED findings never merge with non-disputed ones, so a skeptic's disproof stays visible in the report.

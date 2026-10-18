@@ -376,7 +376,64 @@ def mk(fid, lane, path, line, category, title, root, verdict, severity):
             "file": "x", "test": ""}
 
 
+CHECKOUT_SRC = """<?php
+class C
+{
+    public function store($request)
+    {
+        // line 6
+        $product = Product::find(1);
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        //
+        if ($product->stock < 1) {}          // line 24
+        //
+        //
+        //
+        //
+        //
+        $product->save();                     // line 31
+    }
+}
+"""
+
+# Two different authz bugs 6 lines apart, in different methods of the same controller.
+TWO_METHODS_SRC = """<?php
+class TeamController
+{
+    public function show($id)
+    {
+        return Team::findOrFail($id);         // line 6: IDOR on show
+    }
+
+    public function update($request, $id)
+    {
+        $team = Team::findOrFail($id);
+        $team->update($request->all());       // line 12: mass assignment of owner_id
+    }
+}
+"""
+
+
 class TestDedupe(Base):
+    def source(self, rel, text):
+        path = os.path.join(self.project, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+
     def dedupe(self, findings):
         self.init("--lanes", "func", "--depth", "1")
         ctx = self.ctx()
@@ -388,6 +445,7 @@ class TestDedupe(Base):
 
     def test_merge_rules(self):
         C, O = "app/C.php", "app/O.php"
+        self.source(C, CHECKOUT_SRC)
         fs = self.dedupe([
             mk("RC-001", "race-conditions", C, 24, "race", "Overselling", "non-atomic decrement on stock",
                "LIKELY", "CRITICAL"),
@@ -425,12 +483,51 @@ class TestDedupe(Base):
 
     def test_same_issue_rules_directly(self):
         a = mk("A", "x", "f.php", 10, "race", "Title one", "root one", "LIKELY", "LOW")
+        same_fn = lambda f: "store"  # noqa: E731
+        unknown_fn = lambda f: None  # noqa: E731
         self.assertEqual(qa.same_issue(a, mk("B", "y", "g.php", 99, "authz", "Other", "Root ONE!", "LIKELY", "LOW")),
                          "same-root-cause")
-        self.assertEqual(qa.same_issue(a, mk("B", "y", "f.php", 20, "race", "Other", "x", "LIKELY", "LOW")),
-                         "same-file-nearby")
-        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 21, "race", "Other", "x", "LIKELY", "LOW")))
-        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 12, "authz", "Other", "x", "LIKELY", "LOW")))
+        b = mk("B", "y", "f.php", 20, "race", "Other", "x", "LIKELY", "LOW")
+        self.assertEqual(qa.same_issue(a, b, same_fn), "same-function")
+        self.assertIsNone(qa.same_issue(a, b, lambda f: "store" if f["id"] == "A" else "update"),
+                          "nearby but in different functions")
+        self.assertIsNone(qa.same_issue(a, b, unknown_fn), "unknown function and dissimilar wording")
+        c = mk("C", "y", "f.php", 20, "race", "Title one again", "root one, twice", "LIKELY", "LOW")
+        self.assertEqual(qa.same_issue(a, c, unknown_fn), "same-file-nearby", "unknown function, similar wording")
+        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 21, "race", "Other", "x", "LIKELY", "LOW"), same_fn))
+        self.assertIsNone(qa.same_issue(a, mk("B", "y", "f.php", 12, "authz", "Other", "x", "LIKELY", "LOW"), same_fn))
+
+    def test_nearby_bugs_in_different_methods_stay_separate(self):
+        T = "app/Http/Controllers/TeamController.php"
+        self.source(T, TWO_METHODS_SRC)
+        fs = self.dedupe([
+            mk("AZ-001", "authz-security", T, 6, "authz", "Any member can read any team", "show() has no policy",
+               "CONFIRMED", "CRITICAL"),
+            mk("AZ-002", "authz-security", T, 12, "authz", "Member can set owner_id on update",
+               "mass assignment via request->all()", "LIKELY", "HIGH"),
+        ])
+        self.assertEqual((fs["AZ-001"]["status"], fs["AZ-002"]["status"]), ("final", "final"))
+
+    def test_nearby_bugs_in_same_method_merge(self):
+        T = "app/Http/Controllers/TeamController.php"
+        self.source(T, TWO_METHODS_SRC)
+        fs = self.dedupe([
+            mk("AZ-001", "authz-security", T, 11, "authz", "Update loads any team", "no ownership check",
+               "LIKELY", "HIGH"),
+            mk("AD-001", "adversary", T, 12, "authz", "Editing someone else's team", "missing policy on update",
+               "LIKELY", "MEDIUM"),
+        ])
+        self.assertEqual(fs["AZ-001"]["merged_from"], ["AD-001"])
+        self.assertEqual(self.state()["dedupe_rules"], ["AD-001 ~ AZ-001 (same-function)"])
+
+    def test_enclosing_function_detection(self):
+        self.source("app/x.py", "class A:\n    def first(self):\n        pass\n\n    async def second(self):\n        x = 1\n")
+        self.source("app/x.go", "package x\n\nfunc (s *Svc) Charge(id int) {\n\tdo()\n}\n")
+        cache = {}
+        self.assertEqual(qa.enclosing_function(self.project, "app/x.py", 3, cache), "first")
+        self.assertEqual(qa.enclosing_function(self.project, "app/x.py", 6, cache), "second")
+        self.assertEqual(qa.enclosing_function(self.project, "app/x.go", 4, cache), "Charge")
+        self.assertIsNone(qa.enclosing_function(self.project, "app/missing.php", 4, cache))
 
     def test_disputed_does_not_absorb(self):
         fs = self.dedupe([
@@ -503,16 +600,69 @@ class TestCollect(Base):
         self.assertIn("downgraded", fs["RC-001"]["verdict_note"])
         self.assertEqual(fs["QC-001"]["verdict"], "CONFIRMED", "non-race findings need no parallel marker")
 
-    def test_race_confirmed_with_parallel_marker_stays_confirmed(self):
-        self.write("verdicts/RC-001.md", verdict("RC-001", "CONFIRMED", CHECKOUT + ":24", parallel="yes",
-                                                 test=".qa-squad/x/tests/OversellTest.php"))
+    PARALLEL_TEST = ("<?php\nit('never oversells', function () {\n"
+                     "    $results = Process::pool(fn ($pool) => [$pool->command('php checkout.php'),\n"
+                     "                                            $pool->command('php checkout.php')])->start()->wait();\n"
+                     "    expect(Product::find(7)->stock)->toBe(0);\n});\n")
+    SEQUENTIAL_TEST = ("<?php\nit('never oversells', function () {\n"
+                       "    $this->postJson('/api/checkout', $body);\n    $this->postJson('/api/checkout', $body);\n"
+                       "    expect(Product::find(7)->stock)->toBe(0);\n});\n")
+
+    def race_verdict(self, test, parallel="yes"):
+        self.write("verdicts/RC-001.md", verdict("RC-001", "CONFIRMED", CHECKOUT + ":24", parallel=parallel,
+                                                 test=test))
         self.write("verdicts/QC-001.md", verdict("QC-001", "NEEDS-ENV", CHECKOUT + ":24"))
         self.qa("collect")
-        fs = self.state()["findings"]
-        self.assertEqual(fs["RC-001"]["verdict"], "CONFIRMED")
-        self.assertTrue(fs["RC-001"]["parallel_test"])
-        self.assertEqual(fs["RC-001"]["test"], ".qa-squad/x/tests/OversellTest.php")
-        self.assertEqual(fs["QC-001"]["verdict"], "NEEDS-ENV")
+        return self.state()["findings"]["RC-001"]
+
+    def test_race_confirmed_with_real_parallel_test_stays_confirmed(self):
+        rel = ".qa-squad/%s/tests/OversellTest.php" % self.run_id()
+        self.write("tests/OversellTest.php", self.PARALLEL_TEST)
+        f = self.race_verdict(rel)
+        self.assertEqual(f["verdict"], "CONFIRMED", f["verdict_note"])
+        self.assertTrue(f["parallel_test"])
+        self.assertEqual(f["test"], rel)
+        self.assertEqual(self.state()["findings"]["QC-001"]["verdict"], "NEEDS-ENV")
+
+    def test_race_test_path_may_be_relative_to_tests_dir(self):
+        self.write("tests/OversellTest.php", self.PARALLEL_TEST)
+        self.assertEqual(self.race_verdict("OversellTest.php")["verdict"], "CONFIRMED")
+
+    def test_race_claimed_parallel_but_test_file_missing(self):
+        f = self.race_verdict(".qa-squad/%s/tests/Nope.php" % self.run_id())
+        self.assertEqual(f["verdict"], "LIKELY")
+        self.assertIn("not found inside", f["verdict_note"])
+        self.assertFalse(f["parallel_test"])
+
+    def test_race_claimed_parallel_but_no_test_named(self):
+        f = self.race_verdict("none")
+        self.assertEqual(f["verdict"], "LIKELY")
+        self.assertIn("no test file named", f["verdict_note"])
+
+    def test_race_test_outside_run_tests_dir_does_not_count(self):
+        outside = os.path.join(self.project, "tests", "Feature", "OversellTest.php")
+        os.makedirs(os.path.dirname(outside), exist_ok=True)
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write(self.PARALLEL_TEST)
+        f = self.race_verdict("tests/Feature/OversellTest.php")
+        self.assertEqual(f["verdict"], "LIKELY")
+        self.assertIn("not found inside", f["verdict_note"])
+
+    def test_race_sequential_test_is_downgraded(self):
+        self.write("tests/OversellTest.php", self.SEQUENTIAL_TEST)
+        f = self.race_verdict("OversellTest.php")
+        self.assertEqual(f["verdict"], "LIKELY")
+        self.assertIn("uses no parallel construct", f["verdict_note"])
+
+    def test_parallel_markers_across_stacks(self):
+        for snippet in ("Process::pool(", "Concurrency::run([", "pcntl_fork()", "Http::pool(fn", "proc_open($cmd",
+                        "from multiprocessing import Pool", "with ThreadPoolExecutor() as ex",
+                        "await asyncio.gather(a(), b())", "await Promise.all([a(), b()])",
+                        "require('child_process')", "Thread.new { buy }", "go func() {", "var wg sync.WaitGroup"):
+            self.assertTrue(qa.PARALLEL_RE.search(snippet), snippet)
+        for snippet in ("$this->postJson('/api/checkout');", "for i in range(2): client.post(url)",
+                        "await a(); await b();"):
+            self.assertFalse(qa.PARALLEL_RE.search(snippet), snippet)
 
 
 # ---------------------------------------------------------------------------

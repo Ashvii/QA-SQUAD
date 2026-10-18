@@ -75,9 +75,9 @@ Or just ask: *"is this production ready?"*, *"break this"*, *"find bugs in the r
    ▼
  VERIFY ────── one skeptic per finding. Sees scope + claim only, never the hunter's reasoning.
    │           CONFIRMED / LIKELY / DISPUTED / NEEDS-ENV, each with file:line evidence.
-   │           Race claims need a real-parallelism test to be CONFIRMED.
+   │           Race claims need a real parallel test file (checked by qa.py) to be CONFIRMED.
    ▼
- DEDUPE ────── pure Python: same root cause / same file ±10 lines / fuzzy title → merge,
+ DEDUPE ────── pure Python: same root cause / same function ±10 lines / fuzzy title → merge,
    │           keep the best evidence + highest severity, mark "multi-lane"
    ▼
  REPORT ────── REPORT.md + testcases.csv + release gate (PASS / WARN / BLOCK)
@@ -142,7 +142,7 @@ These hard rules are repeated in the skill and in every sub-agent brief:
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v      # 42 tests, stdlib only
+python3 -m unittest discover -s tests -v      # 51 tests, stdlib only
 python3 tests/dry_run.py --keep                # full pipeline on tests/fixtures/shop with stand-in agents
 python3 skills/qa-squad/qa.py plan --quick     # cost table
 ```

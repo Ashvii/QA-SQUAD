@@ -67,6 +67,7 @@ MAX_FINDINGS_PER_HUNTER = 8
 CONSENT_THRESHOLD = 60
 MAX_OFFERS = 3
 RETRY_REJECT_RATIO = 0.5
+NEARBY_TEXT_RATIO = 0.5   # nearby findings with no known enclosing function must be at least this similar
 SENSITIVE_LANES = ("race-conditions", "authz-security", "data-integrity")
 SENSITIVE_CATEGORIES = ("race", "authz", "integrity")
 SENSITIVE_TERMS = re.compile(
@@ -86,6 +87,19 @@ CONCRETE_RES = (
     re.compile(r"\b(ms|milliseconds?|seconds?|minutes?|timeout|delay|expired?|expiry)\b", re.I),
 )
 HUNT_FILE_RE = re.compile(r"^(?P<hunter>(?P<lane>.+)-(?:\d+|fix))-(?P<k>\d+)\.md$")
+# Constructs that run work in real parallel (separate processes, threads, connections or in-flight requests).
+# A race CONFIRMED must point at a test file under .qa-squad/<run>/tests/ that uses one of them.
+PARALLEL_RE = re.compile(
+    r"Process::(?:pool|concurrently)|Concurrency::(?:run|defer)|Http::pool|pcntl_fork|proc_open|popen\s*\(|"
+    r"curl_multi_exec|new\s+Process\s*\(|Spatie\\Async|Pool::create|parallel\\Runtime|"         # PHP
+    r"multiprocessing|ProcessPoolExecutor|ThreadPoolExecutor|threading\.Thread|subprocess\.Popen|"
+    r"asyncio\.gather|os\.fork|"                                                                # Python
+    r"Promise\.all(?:Settled)?|worker_threads|child_process|cluster\.fork|"                     # JS / TS
+    r"Thread\.new|Process\.fork|\bfork\s*\{|Parallel\.(?:map|each)|Concurrent::|"               # Ruby
+    r"\bgo\s+func|sync\.WaitGroup|errgroup")                                                     # Go
+# Function/method declarations, used to tell whether two nearby findings sit in the same function.
+FUNC_RE = re.compile(r"^\s*(?:(?:public|protected|private|static|final|abstract|async|export|default|override)\s+)*"
+                     r"(?:function|def|fn|func(?:\s+\([^)]*\))?)\s+&?(\w+)")
 
 # ---------------------------------------------------------------------------
 # Sub-agent briefs. SKILL.md quotes these verbatim; tests keep them in sync.
@@ -796,10 +810,13 @@ def skeptic_brief(ctx, job):
              "What breaks:", claim["what"], "",
              "Exact trigger:", claim["trigger"], ""]
     if finding["lane"] == "race-conditions" or finding.get("category") == "race":
-        parts += ["This is a race-condition claim: CONFIRMED requires a test with real parallelism "
-                  "(separate processes or DB connections released by a barrier) and `parallel_test: yes`. "
-                  "Calling the endpoint twice in sequence does not count. Otherwise the best you can give is "
-                  "LIKELY.", ""]
+        parts += ["This is a race-condition claim. CONFIRMED requires ALL of: (a) a test file saved under "
+                  ".qa-squad/%s/tests/ and named in `test:`; (b) that test runs the trigger with real "
+                  "parallelism: separate processes or DB connections released by a barrier (e.g. Process::pool, "
+                  "Concurrency::run, pcntl_fork, proc_open, Http::pool against a running server, or the stack's "
+                  "equivalent: multiprocessing, Promise.all, threads, goroutines); (c) `parallel_test: yes`. "
+                  "qa.py checks the file exists there and uses a parallel construct; otherwise it downgrades "
+                  "CONFIRMED to LIKELY. Calling the endpoint twice in sequence does not count." % ctx.run_id, ""]
     if job.get("requeue_reason"):
         parts += ["YOUR PREVIOUS VERDICT FOR THIS FINDING WAS REJECTED: %s. Every verdict must cite at least "
                   "one file:line (e.g. app/Http/Controllers/OrderController.php:42)." % job["requeue_reason"], ""]
@@ -1202,6 +1219,35 @@ def is_race(finding):
     return finding["lane"] == "race-conditions" or finding.get("category") == "race"
 
 
+def resolve_run_test(ctx, test):
+    """Find the skeptic's test file. It must exist inside .qa-squad/<run>/tests/; returns its path or None."""
+    tests_dir = os.path.realpath(ctx.path("tests"))
+    rel = test.strip().strip("`").replace("\\", "/")
+    candidates = [rel if os.path.isabs(rel) else os.path.join(ctx.project, *rel.split("/")),
+                  os.path.join(ctx.run_dir, *rel.split("/")),
+                  os.path.join(tests_dir, *rel.split("/"))]
+    for cand in candidates:
+        real = os.path.realpath(cand)
+        if os.path.isfile(real) and os.path.commonpath([real, tests_dir]) == tests_dir:
+            return real
+    return None
+
+
+def parallel_test_problem(ctx, claimed, test):
+    """Why a race CONFIRMED is not backed by a real-parallelism test, or None if it is."""
+    if not claimed:
+        return "race claims need a real-parallelism test (parallel_test: yes)"
+    if not test:
+        return "parallel_test: yes but no test file named"
+    path = resolve_run_test(ctx, test)
+    if not path:
+        return "test file %s not found inside %s" % (test, ctx.rel("tests") + "/")
+    if not PARALLEL_RE.search(read_text(path)):
+        return ("test %s uses no parallel construct (separate processes, threads, connections or "
+                "concurrent requests)" % test)
+    return None
+
+
 def normalize_verdict(value):
     v = re.sub(r"[\s_]+", "-", (value or "").strip().upper())
     return "NEEDS-ENV" if v in ("NEEDSENV", "NEEDS-ENVIRONMENT") else v
@@ -1245,14 +1291,19 @@ def cmd_collect(args):
                 tally["gave_up"] += 1
             continue
         note = ""
-        parallel = truthy(fm.get("parallel_test"))
-        if verdict == "CONFIRMED" and is_race(finding) and not parallel:
-            verdict = "LIKELY"
-            note = "downgraded CONFIRMED -> LIKELY: race claims need a real-parallelism test (parallel_test: yes)"
-            tally["downgraded"] += 1
+        test = "" if norm(fm.get("test")) in ("", "none", "n a", "na", "no") else fm["test"].strip()
+        parallel = False
+        if verdict == "CONFIRMED" and is_race(finding):
+            problem = parallel_test_problem(ctx, truthy(fm.get("parallel_test")), test)
+            if problem:
+                verdict = "LIKELY"
+                note = "downgraded CONFIRMED -> LIKELY: %s" % problem
+                tally["downgraded"] += 1
+            else:
+                parallel = True
         finding.update({
             "verdict": verdict, "verdict_note": note, "parallel_test": parallel,
-            "test": "" if norm(fm.get("test")) in ("", "none", "n a", "na", "no") else fm["test"].strip(),
+            "test": test,
             "verdict_evidence": "\n".join(dict.fromkeys(
                 x for x in (fm.get("evidence", "").strip(), strip_comments(sec.get("evidence", ""))) if x)),
             "verdict_reason": strip_comments(sec.get("reasoning", "")),
@@ -1278,17 +1329,52 @@ def cmd_collect(args):
 # dedupe
 # ---------------------------------------------------------------------------
 
-def same_issue(a, b):
-    """Return the rule name that makes a and b the same issue, or None."""
+def enclosing_function(project, path, line, cache):
+    """Name of the nearest function/method declared at or above `line`, or None if unknown."""
+    if (path, line) in cache:
+        return cache[(path, line)]
+    if path not in cache:
+        full = os.path.join(project, path) if project else None
+        try:
+            cache[path] = read_text(full).splitlines() if full and os.path.isfile(full) else None
+        except OSError:
+            cache[path] = None
+    lines = cache[path]
+    name = None
+    if lines:
+        for text in reversed(lines[:max(0, min(line, len(lines)))]):
+            m = FUNC_RE.match(text)
+            if m:
+                name = m.group(1)
+                break
+    cache[(path, line)] = name
+    return name
+
+
+def text_ratio(a, b):
+    return difflib.SequenceMatcher(None, norm(a["title"] + " " + a["root_cause"]),
+                                   norm(b["title"] + " " + b["root_cause"])).ratio()
+
+
+def same_issue(a, b, func_of=None):
+    """Return the rule name that makes a and b the same issue, or None.
+
+    `func_of(finding)` returns the enclosing function name (or None). Nearby findings in the same category
+    only merge if they are in the same function; when the function is unknown, their wording must be similar.
+    """
     ra, rb = norm(a["root_cause"]), norm(b["root_cause"])
     if ra and ra == rb:
         return "same-root-cause"
     if a["path"] == b["path"]:
         if abs(a["line"] - b["line"]) <= 10 and a["category"] == b["category"]:
-            return "same-file-nearby"
-        ratio = difflib.SequenceMatcher(None, norm(a["title"] + " " + a["root_cause"]),
-                                        norm(b["title"] + " " + b["root_cause"])).ratio()
-        if ratio >= 0.75:
+            fa = func_of(a) if func_of else None
+            fb = func_of(b) if func_of else None
+            if fa and fb:
+                if fa == fb:
+                    return "same-function"
+            elif text_ratio(a, b) >= NEARBY_TEXT_RATIO:
+                return "same-file-nearby"
+        if text_ratio(a, b) >= 0.75:
             return "fuzzy-title"
     return None
 
@@ -1297,11 +1383,15 @@ def verdict_of(f):
     return f.get("verdict") or "UNVERIFIED"
 
 
-def dedupe_groups(findings):
+def dedupe_groups(findings, project=None):
     """Union-find over pairs. DISPUTED and non-DISPUTED findings are never joined."""
     items = sorted(findings, key=lambda f: natkey(f["id"]))
     parent = list(range(len(items)))
     rules = {}
+    cache = {}
+
+    def func_of(f):
+        return enclosing_function(project, f["path"], f["line"], cache)
 
     def find(i):
         while parent[i] != i:
@@ -1314,7 +1404,7 @@ def dedupe_groups(findings):
             a, b = items[i], items[j]
             if (verdict_of(a) == "DISPUTED") != (verdict_of(b) == "DISPUTED"):
                 continue
-            rule = same_issue(a, b)
+            rule = same_issue(a, b, func_of)
             if rule:
                 rules[(a["id"], b["id"])] = rule
                 ri, rj = find(i), find(j)
@@ -1336,7 +1426,7 @@ def cmd_dedupe(args):
     for f in items:
         f.update({"status": "new", "merged_from": [], "merged_into": None, "found_by_lanes": [f["lane"]],
                   "multi_lane": False, "severity": f.get("orig_severity", f["severity"])})
-    groups, rules = dedupe_groups(items)
+    groups, rules = dedupe_groups(items, ctx.project)
     merges = []
     for group in groups:
         group.sort(key=lambda f: (-VERDICT_RANK[verdict_of(f)], -SEV_RANK[f["severity"]], natkey(f["id"])))
