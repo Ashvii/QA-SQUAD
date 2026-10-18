@@ -1,0 +1,10 @@
+{
+  "name": "qa-squad",
+  "version": "1.0.0",
+  "description": "Multi-agent QA: specialist sub-agents hunt bugs by lane (functional, race conditions, data integrity, authz/security, database, queue/cache/external, performance, UI, ops, adversary), skeptics verify every finding, and you get one deduplicated report with test cases and a PASS/WARN/BLOCK release gate. Stdlib-only Python, no API key.",
+  "author": {
+    "name": "Ashvii"
+  },
+  "license": "MIT",
+  "keywords": ["qa", "testing", "race-conditions", "security", "laravel", "code-review", "release-gate", "sub-agents"]
+}

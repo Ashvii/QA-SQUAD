@@ -1,0 +1,11 @@
+{
+    "name": "fixture/shop",
+    "description": "Tiny deliberately-buggy Laravel shop used by qa-squad's dry run. Not a real app.",
+    "require": {
+        "php": "^8.2",
+        "laravel/framework": "^11.0"
+    },
+    "require-dev": {
+        "pestphp/pest": "^2.34"
+    }
+}

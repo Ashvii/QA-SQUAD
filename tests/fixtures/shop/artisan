@@ -1,0 +1,3 @@
+#!/usr/bin/env php
+<?php
+// Fixture stub: the dry run never executes PHP. qa.py only uses this file to detect Laravel.

@@ -1,0 +1,6 @@
+# qa-squad run output
+.qa-squad/
+
+# Python
+__pycache__/
+*.pyc
